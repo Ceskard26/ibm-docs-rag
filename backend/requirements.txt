@@ -1,0 +1,11 @@
+fastapi==0.137.0
+uvicorn==0.49.0
+python-dotenv==1.2.2
+python-multipart==0.0.32
+pypdf==6.13.2
+psycopg2-binary==2.9.12
+pgvector==0.4.2
+ibm-watsonx-ai==1.5.13
+beautifulsoup4==4.15.0
+requests==2.34.2
+playwright==1.60.0

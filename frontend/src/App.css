@@ -1,0 +1,105 @@
+.lang-dropdown {
+  display: flex;
+  align-items: center;
+  padding-right: 0.5rem;
+  min-width: 11rem;
+}
+
+.app-content {
+  max-width: 1312px;
+  margin: 0 auto;
+  padding-top: 2rem;
+  padding-bottom: 4rem;
+  min-height: 100vh;
+}
+
+.app-title {
+  font-size: 2.25rem;
+  font-weight: 300;
+  line-height: 1.2;
+  margin: 0 0 0.5rem;
+}
+
+.app-subtitle {
+  color: #c6c6c6;
+  margin-bottom: 2rem;
+}
+
+.ask-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.samples {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1.5rem;
+}
+
+.samples-label {
+  color: #8d8d8d;
+  font-size: 0.875rem;
+}
+
+.sample-btn {
+  border: 1px solid #4d4d4d;
+  border-radius: 16px;
+}
+
+.answer-tile {
+  margin-top: 2rem;
+}
+
+.answer-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: #78a9ff;
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+}
+
+.answer-text {
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.sources {
+  margin-top: 2rem;
+}
+
+.sources h3 {
+  font-weight: 400;
+  margin-bottom: 1rem;
+}
+
+.source-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.source-content {
+  line-height: 1.5;
+  color: #c6c6c6;
+  margin-bottom: 0.75rem;
+}
+
+.ingest-tile {
+  margin-top: 3.5rem;
+}
+
+.ingest-tile h3 {
+  font-weight: 400;
+  margin-bottom: 0.5rem;
+}
+
+.ingest-help {
+  color: #8d8d8d;
+  font-size: 0.875rem;
+  margin-bottom: 1rem;
+}
