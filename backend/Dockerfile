@@ -6,8 +6,9 @@ WORKDIR /app
 COPY requirements-api.txt .
 RUN pip install --no-cache-dir -r requirements-api.txt
 
-# Código del API y certificado de PostgreSQL (CA pública de IBM Cloud Databases).
+# Código del API (main.py + auth.py) y certificado de PostgreSQL (CA pública de IBM Cloud Databases).
 COPY main.py .
+COPY auth.py .
 COPY postgres_cert.pem .
 
 # Code Engine inyecta el puerto en $PORT (8080 por defecto).

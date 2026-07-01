@@ -6,6 +6,7 @@ pypdf==6.13.2
 psycopg2-binary==2.9.12
 pgvector==0.4.2
 ibm-watsonx-ai==1.5.13
+PyJWT[crypto]==2.13.0
 beautifulsoup4==4.15.0
 requests==2.34.2
 playwright==1.60.0

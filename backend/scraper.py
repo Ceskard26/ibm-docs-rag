@@ -230,9 +230,15 @@ def fetch_raw_md(repo: str, name: str, branch: str = "master") -> str:
     return r.text if r.ok else ""
 
 
-def doc_url(product: str, name: str) -> str:
-    """URL pública del doc para citar la fuente (convención topic = <producto>-<archivo>)."""
-    return f"https://cloud.ibm.com/docs/{product}?topic={product}-{name}"
+def doc_url(repo: str, name: str, branch: str = "master") -> str:
+    """URL de la fuente: el archivo en GitHub que realmente usamos como data source.
+
+    Antes construíamos la URL de cloud.ibm.com por convención (<producto>-<archivo>),
+    pero esa convención no siempre calza con el topic real -> a veces daba 404. El
+    blob de GitHub SIEMPRE existe (es lo que descargamos) y además renderiza el
+    markdown de forma legible para el usuario.
+    """
+    return f"https://github.com/ibm-cloud-docs/{repo}/blob/{branch}/{name}.md"
 
 
 def ingest_github(products=None, max_files: int = MAX_FILES_PER_PRODUCT):
@@ -246,7 +252,7 @@ def ingest_github(products=None, max_files: int = MAX_FILES_PER_PRODUCT):
             raw = fetch_raw_md(repo, name)
             text = clean_markdown(raw)
             if len(text) >= 200:
-                items.append((doc_url(product, name), text))
+                items.append((doc_url(repo, name), text))
     print(f"Total de documentos a indexar: {len(items)}")
     ingest_texts(items)
 
