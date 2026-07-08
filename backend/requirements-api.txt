@@ -9,7 +9,8 @@ psycopg2-binary==2.9.12
 pgvector==0.4.2
 ibm-watsonx-ai==1.5.13
 PyJWT[crypto]==2.13.0
-requests==2.34.2
+# ibm-cos-sdk-core exige requests<2.32.3; por eso se fija aquí (no 2.34.x).
+requests==2.32.2
 ibm-cos-sdk==2.14.0
 python-pptx==1.0.2
 cairosvg==2.8.2
