@@ -16,3 +16,6 @@ backend/data/
 
 # OS
 .DS_Store
+
+# Caché de iconos PPTX (se regenera en runtime)
+backend/assets/icon-cache/

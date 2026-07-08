@@ -1,0 +1,348 @@
+/* SlideDeck — carrusel de presentacion IBM Knowledge Agent */
+
+/* ── Contenedor principal ─────────────────────────────────────────────────── */
+.slide-deck {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+/* ── Tarjeta base de slide ────────────────────────────────────────────────── */
+.slide-card {
+  background: #161616;
+  border-top: 3px solid #0f62fe;
+  border-bottom: 3px solid #0f62fe;
+  border-left: none;
+  border-right: none;
+  border-radius: 0;
+  min-height: 280px;
+  padding: 1.75rem 2rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.4);
+  position: relative;
+  overflow: hidden;
+}
+
+.slide-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  flex: 1;
+}
+
+/* ── Título y subtítulo ───────────────────────────────────────────────────── */
+.slide-title {
+  font-size: 1.3125rem;
+  font-weight: 300;
+  color: #f4f4f4;
+  margin: 0 0 0.5rem;
+  line-height: 1.2;
+  border-bottom: 1px solid #0f62fe;
+  padding-bottom: 0.5rem;
+}
+
+.slide-subtitle {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: #78a9ff;
+  margin: 0.625rem 0 0.25rem;
+}
+
+/* ── Bullets ──────────────────────────────────────────────────────────────── */
+.slide-bullets {
+  margin: 0.5rem 0 0;
+  padding-left: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+  list-style: none;
+}
+
+.slide-bullets li {
+  position: relative;
+  color: #e0e0e0;
+  line-height: 1.55;
+  font-size: 0.9375rem;
+}
+
+.slide-bullets li::before {
+  content: '';
+  position: absolute;
+  left: -1.15rem;
+  top: 0.35rem;
+  width: 0.5rem;
+  height: 0.5rem;
+  background: #4589ff;
+}
+
+.slide-bullets strong {
+  color: #f4f4f4;
+}
+
+.slide-para {
+  color: #c6c6c6;
+  line-height: 1.6;
+  margin: 0.25rem 0 0;
+  font-size: 0.9375rem;
+}
+
+/* ── Layout: IMPACTO ─────────────────────────────────────────────────────── */
+.slide-impact {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  min-height: 200px;
+  padding: 0.5rem 0;
+}
+
+.slide-impact-bar {
+  width: 4px;
+  height: 100%;
+  min-height: 120px;
+  background: #0f62fe;
+  flex-shrink: 0;
+  border-radius: 2px;
+}
+
+.slide-impact-quote {
+  font-size: 1.625rem;
+  font-weight: 300;
+  color: #f4f4f4;
+  line-height: 1.4;
+  margin: 0;
+  border: none;
+  padding: 0;
+  font-style: normal;
+}
+
+/* ── Layout: DIVISOR ─────────────────────────────────────────────────────── */
+.slide-divider {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 200px;
+  gap: 0.75rem;
+  padding: 0.5rem 0;
+}
+
+.slide-divider-accent {
+  width: 3rem;
+  height: 3px;
+  background: #a56eff;
+  border-radius: 2px;
+}
+
+.slide-divider-title {
+  font-size: 2rem;
+  font-weight: 300;
+  color: #78a9ff;
+  margin: 0;
+  line-height: 1.2;
+}
+
+/* ── Layout: STATS ──────────────────────────────────────────────────────── */
+.slide-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.slide-stats-cards {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+
+.slide-stat-card {
+  flex: 1;
+  min-width: 120px;
+  background: #1e1e1e;
+  padding: 1rem 1.125rem;
+  border-top: 2px solid #0f62fe;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.slide-stat-figure {
+  font-size: 2.25rem;
+  font-weight: 700;
+  color: #4589ff;
+  line-height: 1;
+}
+
+.slide-stat-desc {
+  font-size: 0.875rem;
+  color: #a8c8ff;
+  line-height: 1.45;
+}
+
+/* ── Layout: DEFS ──────────────────────────────────────────────────────── */
+.slide-defs {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+}
+
+.slide-defs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 0.5rem 0 0;
+}
+
+.slide-def-item {
+  border-bottom: 1px solid #262626;
+  padding: 0.625rem 0;
+}
+
+.slide-def-item:last-child {
+  border-bottom: none;
+}
+
+.slide-def-term {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: #78a9ff;
+  margin: 0 0 0.25rem;
+}
+
+.slide-def-desc {
+  font-size: 0.875rem;
+  color: #c6c6c6;
+  line-height: 1.5;
+  margin: 0;
+  padding-left: 0.75rem;
+}
+
+/* ── Layout: STEPS (pasos numerados) ─────────────────────────────────────── */
+.slide-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+}
+
+.slide-steps-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.slide-step-item {
+  display: flex;
+  align-items: baseline;
+  gap: 0.875rem;
+  border-bottom: 1px solid #262626;
+  padding: 0.75rem 0;
+}
+
+.slide-step-item:last-child {
+  border-bottom: none;
+}
+
+.slide-step-number {
+  font-size: 1.5rem;
+  font-weight: 300;
+  color: #4589ff;
+  min-width: 2.25rem;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.slide-step-text {
+  color: #c6c6c6;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+}
+
+.slide-step-keyword {
+  color: #f4f4f4;
+  font-weight: 600;
+}
+
+.slide-step-sep {
+  margin: 0 0.375rem;
+  color: #6f6f6f;
+}
+
+.slide-step-desc strong {
+  color: #f4f4f4;
+}
+
+/* ── Layout: CARDS (grid de tarjetas) ────────────────────────────────────── */
+.slide-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+}
+
+.slide-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.slide-card-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  background: #262626;
+  border-top: 3px solid #0f62fe;
+  padding: 0.875rem 1rem;
+}
+
+.slide-card-keyword {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: #f4f4f4;
+}
+
+.slide-card-desc {
+  font-size: 0.8125rem;
+  color: #a8c8ff;
+  line-height: 1.45;
+}
+
+/* ── Controles de navegacion ─────────────────────────────────────────────── */
+.slide-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.slide-counter {
+  font-size: 0.8125rem;
+  color: #8d8d8d;
+  min-width: 3.5rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.slide-copy-btn {
+  margin-left: auto;
+}
+
+/* Fallback: si el content llega antes de que se termine de parsear */
+.slide-raw {
+  white-space: pre-wrap;
+  line-height: 1.6;
+  color: #c6c6c6;
+  font-size: 0.9rem;
+}
+
+.slide-download-btn {
+  margin-left: 0.25rem;
+}
+
+.slide-download-error {
+  font-size: 0.8125rem;
+  color: #ff8389;
+  margin: 0.25rem 0 0;
+}

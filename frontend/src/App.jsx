@@ -19,7 +19,6 @@ import {
   FileUploaderDropContainer,
   InlineNotification,
   ProgressBar,
-  Loading,
   Modal,
 } from '@carbon/react'
 import {
@@ -33,8 +32,11 @@ import {
   Login,
   Logout,
   UserAvatar,
+  TrashCan,
 } from '@carbon/icons-react'
 import { initAuth, login, logout } from './auth'
+import SlideDeck from './SlideDeck'
+import ConceptMap from './ConceptMap'
 import './App.css'
 
 const API_BASE = (
@@ -87,6 +89,10 @@ const T = {
     authErrorTitle: 'No se pudo completar el inicio de sesión',
     history: 'Historial de la conversación',
     olderMsgs: 'intercambios anteriores',
+    myConversations: 'Mis conversaciones',
+    noConversations: 'Aún no tienes conversaciones guardadas.',
+    deleteConversation: 'Borrar conversación',
+    untitledConversation: 'Conversación sin título',
     errorTitle: 'Error',
     connectError: 'No se pudo conectar con el backend',
     serverError: (s) => `El servidor respondió ${s}`,
@@ -105,6 +111,10 @@ const T = {
     ingestHelp: 'Sube un documento técnico para ampliar la base de conocimiento.',
     uploadLabel: 'Arrastra un PDF aquí o haz clic para subir',
     uploadingPhase: (n) => `Subiendo ${n}…`,
+    uploadingBytes: (loaded, total) => `Subiendo… ${formatMB(loaded)} MB / ${formatMB(total)} MB`,
+    receivedPhase: (n) => `Recibido ${n}, guardando…`,
+    phaseStoring: 'Guardando en Object Storage…',
+    phaseExtracting: 'Extrayendo texto…',
     processingPhase: (n) => `Procesando ${n}…`,
     chunksIndexed: 'fragmentos indexados',
     indexError: 'Error al indexar',
@@ -129,6 +139,28 @@ const T = {
       '¿Qué es el patrón RAG y cómo funciona?',
       '¿Qué es una VPC en IBM Cloud?',
     ],
+    orgDemoTitle: 'Datos de demostración',
+    orgDemoSubtitle:
+      'Este organigrama usa datos de ejemplo. Se conectará al directorio real próximamente.',
+    orgYou: 'Tú',
+    modeLabel: 'Modo',
+    modeStandard: 'Estándar',
+    modeEmail: 'Correo',
+    modeCampaign: 'Campaña',
+    modePresentation: 'Presentación',
+    modeConceptMap: 'Mapa conceptual',
+    conceptmapFallback: 'No se pudo renderizar el mapa conceptual',
+    audienceLabel: 'Audiencia',
+    audienceExecutive: 'Ejecutiva',
+    audienceTechnical: 'Técnica',
+    audienceSales: 'Comercial',
+    slidesLabel: 'Slides',
+    downloadPptx: 'Descargar .pptx',
+    downloadingPptx: 'Descargando…',
+    downloadPptxError: 'No se pudo generar el .pptx',
+    themeLabel: 'Tema',
+    themeDark: 'Oscuro',
+    themeLight: 'Claro',
   },
   en: {
     product: 'Knowledge Agent',
@@ -158,6 +190,10 @@ const T = {
     authErrorTitle: 'Could not complete sign-in',
     history: 'Conversation history',
     olderMsgs: 'earlier exchanges',
+    myConversations: 'My conversations',
+    noConversations: "You don't have any saved conversations yet.",
+    deleteConversation: 'Delete conversation',
+    untitledConversation: 'Untitled conversation',
     errorTitle: 'Error',
     connectError: 'Could not connect to the backend',
     serverError: (s) => `The server responded ${s}`,
@@ -176,6 +212,10 @@ const T = {
     ingestHelp: 'Upload a technical document to expand the knowledge base.',
     uploadLabel: 'Drag a PDF here or click to upload',
     uploadingPhase: (n) => `Uploading ${n}…`,
+    uploadingBytes: (loaded, total) => `Uploading… ${formatMB(loaded)} MB / ${formatMB(total)} MB`,
+    receivedPhase: (n) => `Received ${n}, saving…`,
+    phaseStoring: 'Saving to Object Storage…',
+    phaseExtracting: 'Extracting text…',
     processingPhase: (n) => `Processing ${n}…`,
     chunksIndexed: 'chunks indexed',
     indexError: 'Indexing error',
@@ -200,6 +240,28 @@ const T = {
       'What is the RAG pattern and how does it work?',
       'What is a VPC in IBM Cloud?',
     ],
+    orgDemoTitle: 'Demo data',
+    orgDemoSubtitle:
+      'This org chart uses sample data. It will connect to the real directory soon.',
+    orgYou: 'You',
+    modeLabel: 'Mode',
+    modeStandard: 'Standard',
+    modeEmail: 'Email',
+    modeCampaign: 'Campaign',
+    modePresentation: 'Presentation',
+    modeConceptMap: 'Concept map',
+    conceptmapFallback: 'Could not render the concept map',
+    audienceLabel: 'Audience',
+    audienceExecutive: 'Executive',
+    audienceTechnical: 'Technical',
+    audienceSales: 'Sales',
+    slidesLabel: 'Slides',
+    downloadPptx: 'Download .pptx',
+    downloadingPptx: 'Downloading…',
+    downloadPptxError: 'Could not generate the .pptx',
+    themeLabel: 'Theme',
+    themeDark: 'Dark',
+    themeLight: 'Light',
   },
 }
 
@@ -219,6 +281,10 @@ function sourceLabel(source) {
     return source.includes('/watsonx/') ? `watsonx · ${topic}` : topic
   }
   return source
+}
+
+function formatMB(bytes) {
+  return (bytes / (1024 * 1024)).toFixed(1)
 }
 
 function browserLang() {
@@ -241,6 +307,11 @@ function App() {
   const [question, setQuestion] = useState('')
   const [messages, setMessages] = useState(loadMessages)
   const [language, setLanguage] = useState('auto')
+  const [mode, setMode] = useState('standard') // standard|email|campaign|presentation|conceptmap
+  // Opciones de presentación (solo aplican cuando mode === 'presentation')
+  const [presAudience, setPresAudience] = useState('executive')
+  const [presSlides, setPresSlides] = useState(6)
+  const [presTheme, setPresTheme] = useState('dark') // 'dark' | 'light'
   const [product, setProduct] = useState('all')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -250,10 +321,19 @@ function App() {
   const [authError, setAuthError] = useState(null)
   const [guest, setGuest] = useState(false) // "explorar sin iniciar sesión"
 
+  // Memoria persistente en BD (solo usuarios autenticados). Anónimos: null siempre,
+  // no se manda `conversation_id` y no se toca esta lista.
+  const [conversationId, setConversationId] = useState(null)
+  const [conversations, setConversations] = useState([])
+
   // Ingesta de PDF
   const [ingestMsg, setIngestMsg] = useState(null)
   const [ingestPhase, setIngestPhase] = useState(null)
-  const [uploadPct, setUploadPct] = useState(0)
+  // Progreso real de bytes en la fase 'uploading'. `pct` queda topado a 95 mientras
+  // el servidor no confirme (línea NDJSON "start") que ya tiene el archivo completo:
+  // el evento nativo `xhr.upload.onprogress` solo mide bytes entregados al buffer
+  // de red del SO, no bytes recibidos/procesados por el backend.
+  const [uploadStats, setUploadStats] = useState({ loaded: 0, total: 0, pct: 0, indeterminate: false })
   const [ingestProgress, setIngestProgress] = useState({ done: 0, total: 0 })
   const [ingestFile, setIngestFile] = useState('')
   const [cancelModal, setCancelModal] = useState(false)
@@ -267,6 +347,26 @@ function App() {
     { id: 'auto', label: `${t.langPrefix}: Auto` },
     { id: 'es', label: `${t.langPrefix}: Español` },
     { id: 'en', label: `${t.langPrefix}: English` },
+  ]
+  const modeItems = [
+    { id: 'standard', label: `${t.modeLabel}: ${t.modeStandard}` },
+    { id: 'email', label: `${t.modeLabel}: ${t.modeEmail}` },
+    { id: 'campaign', label: `${t.modeLabel}: ${t.modeCampaign}` },
+    { id: 'presentation', label: `${t.modeLabel}: ${t.modePresentation}` },
+    { id: 'conceptmap', label: `${t.modeLabel}: ${t.modeConceptMap}` },
+  ]
+  const audienceItems = [
+    { id: 'executive', label: `${t.audienceLabel}: ${t.audienceExecutive}` },
+    { id: 'technical', label: `${t.audienceLabel}: ${t.audienceTechnical}` },
+    { id: 'sales', label: `${t.audienceLabel}: ${t.audienceSales}` },
+  ]
+  const slidesItems = [4, 6, 8, 10].map((n) => ({
+    id: String(n),
+    label: `${t.slidesLabel}: ${n}`,
+  }))
+  const themeItems = [
+    { id: 'dark',  label: `${t.themeLabel}: ${t.themeDark}` },
+    { id: 'light', label: `${t.themeLabel}: ${t.themeLight}` },
   ]
   const productItems = PRODUCTS.map((p) => ({
     id: p.id,
@@ -287,6 +387,80 @@ function App() {
   // Cabeceras con el token (si hay sesión) para las llamadas a la API.
   function authHeader() {
     return authUser?.token ? { Authorization: `Bearer ${authUser.token}` } : {}
+  }
+
+  // Lista de conversaciones guardadas del usuario (solo con sesión iniciada).
+  async function refreshConversations() {
+    if (!authUser) return
+    try {
+      const res = await fetch(`${API_BASE}/conversations`, { headers: { ...authHeader() } })
+      if (!res.ok) return
+      setConversations(await res.json())
+    } catch {
+      /* best-effort: la lista de conversaciones no es crítica */
+    }
+  }
+
+  // Al iniciar sesión, carga la lista de conversaciones guardadas en la BD.
+  useEffect(() => {
+    if (authUser) refreshConversations()
+    else setConversations([])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authUser])
+
+  // Carga una conversación guardada (reconstruye los turnos user/assistant).
+  async function loadConversation(id) {
+    if (loading) return
+    try {
+      const res = await fetch(`${API_BASE}/conversations/${id}`, { headers: { ...authHeader() } })
+      if (!res.ok) return
+      const data = await res.json()
+      let lastQuestion = ''
+      const loaded = (data.messages || []).map((m) => {
+        if (m.role === 'user') {
+          lastQuestion = m.content
+          return { id: uid(), role: 'user', content: m.content }
+        }
+        return {
+          id: uid(),
+          role: 'assistant',
+          q: lastQuestion,
+          content: m.content,
+          sources: m.sources || [],
+          // Restaura el estado de relevancia real: sin fuentes = chitchat/ok;
+          // con fuentes, relevante solo si alguna superó el umbral.
+          relevant: (m.sources || []).length === 0 || (m.sources || []).some((s) => s.relevant),
+          streaming: false,
+          mode: m.mode || 'standard',
+          // Metadata persistida ({theme, presentation_opts} en modo presentación):
+          // permite re-exportar el PPTX con el tema original, no el del dropdown actual.
+          meta: m.meta || null,
+        }
+      })
+      setMessages(loaded)
+      setConversationId(data.id)
+      setError(null)
+    } catch {
+      setError(t.connectError)
+    }
+  }
+
+  // Borra una conversación guardada; si era la activa, limpia el chat actual.
+  async function deleteConversation(id, e) {
+    e?.stopPropagation()
+    try {
+      await fetch(`${API_BASE}/conversations/${id}`, {
+        method: 'DELETE',
+        headers: { ...authHeader() },
+      })
+    } catch {
+      /* best-effort */
+    }
+    setConversations((prev) => prev.filter((c) => c.id !== id))
+    if (conversationId === id) {
+      setMessages([])
+      setConversationId(null)
+    }
   }
 
   // Persistencia: guarda la conversación en el navegador (sobrevive recargas).
@@ -320,10 +494,17 @@ function App() {
       .map((m) => ({ role: m.role, content: m.content }))
 
     const aId = uid()
+    const currentMode = mode
     setMessages((prev) => [
       ...prev,
       { id: uid(), role: 'user', content: query },
-      { id: aId, role: 'assistant', q: query, content: '', sources: [], relevant: true, streaming: true },
+      {
+        id: aId, role: 'assistant', q: query, content: '', sources: [], relevant: true, streaming: true, mode: currentMode,
+        // Igual que al recargar de BD: el deck queda ligado al theme con que se generó.
+        ...(currentMode === 'presentation'
+          ? { meta: { theme: presTheme, presentation_opts: { audience: presAudience, slides: presSlides } } }
+          : {}),
+      },
     ])
     setLoading(true)
     // El intercambio nuevo se renderiza arriba: llevamos la vista al tope.
@@ -335,8 +516,17 @@ function App() {
         body: JSON.stringify({
           question: query,
           language,
+          mode: currentMode,
           products: product === 'all' ? null : [product],
           history,
+          // Solo con sesión iniciada: liga el turno a una conversación persistida en BD.
+          ...(authUser ? { conversation_id: conversationId } : {}),
+          // Opciones de presentación: solo se envían en modo presentación.
+          // `theme` viaja aparte porque no afecta la generación (solo el PPTX);
+          // el backend lo persiste en messages.meta para re-exportar con el tema original.
+          ...(currentMode === 'presentation'
+            ? { presentation_opts: { audience: presAudience, slides: presSlides }, theme: presTheme }
+            : {}),
         }),
       })
       if (!res.ok || !res.body) throw new Error(t.serverError(res.status))
@@ -354,8 +544,15 @@ function App() {
           buffer = buffer.slice(nl + 1)
           if (!line) continue
           const m = JSON.parse(line)
-          if (m.type === 'meta') {
-            patchMessage(aId, { sources: m.sources || [], relevant: m.relevant !== false })
+          if (m.type === 'conversation') {
+            setConversationId(m.conversation_id)
+          } else if (m.type === 'meta') {
+            patchMessage(aId, {
+              sources: m.sources || [],
+              relevant: m.relevant !== false,
+              // mode confirmado por el backend (por si cambia entre el envío y la respuesta)
+              ...(m.mode ? { mode: m.mode } : {}),
+            })
           } else if (m.type === 'token') {
             acc += m.text
             patchMessage(aId, { content: acc })
@@ -363,6 +560,8 @@ function App() {
         }
       }
       patchMessage(aId, { streaming: false })
+      // Refresca la lista (título/orden) ahora que el backend guardó el turno.
+      if (authUser) refreshConversations()
     } catch (e) {
       patchMessage(aId, { streaming: false, content: '', error: e.message || t.connectError })
       setError(e.message || t.connectError)
@@ -376,6 +575,7 @@ function App() {
     setMessages([])
     setError(null)
     localStorage.removeItem(STORAGE_KEY)
+    if (authUser) setConversationId(null)
   }
 
   async function sendFeedback(msg, rating) {
@@ -407,7 +607,7 @@ function App() {
     setIngestMsg(null)
     setIngestFile(file.name)
     setPhraseIdx(0)
-    setUploadPct(0)
+    setUploadStats({ loaded: 0, total: file.size || 0, pct: 0, indeterminate: false })
     setIngestProgress({ done: 0, total: 0 })
     setIngestPhase('uploading')
 
@@ -416,7 +616,14 @@ function App() {
     xhr.open('POST', `${API_BASE}/ingest_stream`)
     if (authUser?.token) xhr.setRequestHeader('Authorization', `Bearer ${authUser.token}`)
     xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) setUploadPct(Math.round((e.loaded / e.total) * 100))
+      if (!e.lengthComputable) {
+        setUploadStats((prev) => ({ ...prev, indeterminate: true }))
+        return
+      }
+      // Topado a 95%: el 100% real solo llega cuando el servidor confirma
+      // (línea NDJSON "start"), no cuando el SO terminó de entregar bytes.
+      const rawPct = e.total > 0 ? (e.loaded / e.total) * 100 : 0
+      setUploadStats({ loaded: e.loaded, total: e.total, pct: Math.min(95, Math.round(rawPct)), indeterminate: false })
     }
     let lastIdx = 0
     xhr.onprogress = () => {
@@ -434,7 +641,18 @@ function App() {
         } catch {
           continue
         }
-        if (m.type === 'start') {
+        if (m.type === 'received') {
+          // El servidor confirma que ya tiene TODOS los bytes: recién aquí la
+          // fase de subida es honestamente 100%. Lo que sigue (guardar/extraer)
+          // no tiene progreso medible en bytes, así que pasamos a fases con
+          // nombre e indeterminadas hasta que llegue "start".
+          setUploadStats((prev) => ({ ...prev, pct: 100, indeterminate: false }))
+          setIngestPhase('received')
+        } else if (m.type === 'phase') {
+          if (m.name === 'storing') setIngestPhase('storing')
+          else if (m.name === 'extracting') setIngestPhase('extracting')
+          // Fases futuras desconocidas: se ignoran (no rompen el flujo).
+        } else if (m.type === 'start') {
           setIngestPhase('processing')
           setIngestProgress({ done: 0, total: m.total || 0 })
         } else if (m.type === 'progress') {
@@ -443,6 +661,8 @@ function App() {
           setIngestPhase(null)
           setIngestMsg({ kind: 'success', text: `${m.count} ${t.chunksIndexed}` })
         }
+        // Cualquier otro `type` no reconocido se ignora silenciosamente (ver
+        // contrato NDJSON de /ingest_stream en docs/GOVERNANCE.md).
       }
     }
     xhr.onerror = () => {
@@ -480,6 +700,55 @@ function App() {
     }
   }
 
+  function renderAssistantBody(m) {
+    const msgMode = m.mode || 'standard'
+
+    // Durante el streaming: todos los modos muestran el texto acumulado tal cual.
+    // Solo conceptmap muestra un cursor diferente (el JSON parcial no es legible).
+    if (m.streaming) {
+      if (msgMode === 'conceptmap') {
+        return (
+          <p className="answer-text answer-text--muted">
+            <span className="cursor">▋</span>
+          </p>
+        )
+      }
+      return (
+        <p className="answer-text">
+          {m.content}
+          <span className="cursor">▋</span>
+        </p>
+      )
+    }
+
+    // Terminó el streaming — renderizado según modo
+    if (msgMode === 'presentation') {
+      return (
+        <SlideDeck
+          content={m.content}
+          copyLabel={t.copy}
+          copiedLabel={t.copied}
+          downloadPptxLabel={t.downloadPptx}
+          downloadingPptxLabel={t.downloadingPptx}
+          downloadPptxErrorLabel={t.downloadPptxError}
+          apiBase={API_BASE}
+          theme={m.meta?.theme || presTheme}
+          presenter={authUser ? { name: authUser.name, role: 'IBM Cloud', email: authUser.email } : undefined}
+        />
+      )
+    }
+    if (msgMode === 'conceptmap') {
+      return (
+        <ConceptMap
+          content={m.content}
+          fallbackNote={t.conceptmapFallback}
+        />
+      )
+    }
+    // standard | email | campaign — texto tal cual (pre-wrap)
+    return <p className="answer-text">{m.content}</p>
+  }
+
   function renderAssistant(m) {
     return (
       <>
@@ -497,11 +766,8 @@ function App() {
             <WatsonHealthTextAnnotationToggle size={20} />
             <span>{t.answer}</span>
           </div>
-          <p className="answer-text">
-            {m.content}
-            {m.streaming && <span className="cursor">▋</span>}
-          </p>
-          {!m.streaming && m.content && (
+          {renderAssistantBody(m)}
+          {!m.streaming && m.content && (m.mode || 'standard') !== 'presentation' && (
             <div className="answer-footer">
               <IconButton
                 label={copiedId === m.id ? t.copied : t.copy}
@@ -545,7 +811,15 @@ function App() {
                   }
                 >
                   <p className="source-content">{s.content}</p>
-                  <a href={s.source} target="_blank" rel="noreferrer">
+                  <a
+                    href={
+                      s.source.startsWith('http')
+                        ? s.source
+                        : `${API_BASE}/files/${encodeURIComponent(s.source)}`
+                    }
+                    target="_blank"
+                    rel="noreferrer"
+                  >
                     {s.source}
                   </a>
                 </AccordionItem>
@@ -608,6 +882,66 @@ function App() {
               onChange={({ selectedItem }) => setLanguage(selectedItem.id)}
             />
           </div>
+          <div className="lang-dropdown">
+            <Dropdown
+              id="mode-select"
+              size="sm"
+              type="inline"
+              label={t.modeLabel}
+              titleText=""
+              hideLabel
+              items={modeItems}
+              itemToString={(i) => (i ? i.label : '')}
+              selectedItem={modeItems.find((m) => m.id === mode)}
+              onChange={({ selectedItem }) => setMode(selectedItem.id)}
+            />
+          </div>
+          {mode === 'presentation' && (
+            <>
+              <div className="lang-dropdown">
+                <Dropdown
+                  id="audience-select"
+                  size="sm"
+                  type="inline"
+                  label={t.audienceLabel}
+                  titleText=""
+                  hideLabel
+                  items={audienceItems}
+                  itemToString={(i) => (i ? i.label : '')}
+                  selectedItem={audienceItems.find((a) => a.id === presAudience)}
+                  onChange={({ selectedItem }) => setPresAudience(selectedItem.id)}
+                />
+              </div>
+              <div className="lang-dropdown">
+                <Dropdown
+                  id="slides-select"
+                  size="sm"
+                  type="inline"
+                  label={t.slidesLabel}
+                  titleText=""
+                  hideLabel
+                  items={slidesItems}
+                  itemToString={(i) => (i ? i.label : '')}
+                  selectedItem={slidesItems.find((s) => s.id === String(presSlides))}
+                  onChange={({ selectedItem }) => setPresSlides(Number(selectedItem.id))}
+                />
+              </div>
+              <div className="lang-dropdown">
+                <Dropdown
+                  id="pptx-theme-select"
+                  size="sm"
+                  type="inline"
+                  label={t.themeLabel}
+                  titleText=""
+                  hideLabel
+                  items={themeItems}
+                  itemToString={(i) => (i ? i.label : '')}
+                  selectedItem={themeItems.find((th) => th.id === presTheme)}
+                  onChange={({ selectedItem }) => setPresTheme(selectedItem.id)}
+                />
+              </div>
+            </>
+          )}
           {authEnabled && (
             <div className="auth-controls">
               {authUser ? (
@@ -674,6 +1008,41 @@ function App() {
                 </Button>
               )}
             </div>
+
+            {authUser && (
+              <Accordion className="my-conversations-accordion">
+                <AccordionItem title={`${t.myConversations} · ${conversations.length}`}>
+                  {conversations.length === 0 ? (
+                    <p className="no-conversations">{t.noConversations}</p>
+                  ) : (
+                    <ul className="conversation-list">
+                      {conversations.map((c) => (
+                        <li
+                          key={c.id}
+                          className={`conversation-item${c.id === conversationId ? ' active' : ''}`}
+                        >
+                          <button
+                            type="button"
+                            className="conversation-title"
+                            onClick={() => loadConversation(c.id)}
+                          >
+                            {c.title || t.untitledConversation}
+                          </button>
+                          <IconButton
+                            label={t.deleteConversation}
+                            kind="ghost"
+                            size="sm"
+                            onClick={(e) => deleteConversation(c.id, e)}
+                          >
+                            <TrashCan />
+                          </IconButton>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </AccordionItem>
+              </Accordion>
+            )}
 
             <TextArea
               labelText={t.questionLabel}
@@ -761,11 +1130,36 @@ function App() {
 
               {ingestPhase === 'uploading' && (
                 <div className="ingest-status">
-                  <div className="ingest-uploading">
-                    <Loading small withOverlay={false} />
-                    <span>{t.uploadingPhase(ingestFile)}</span>
-                    <span className="upload-pct">{uploadPct}%</span>
-                  </div>
+                  <ProgressBar
+                    label={t.uploadingPhase(ingestFile)}
+                    helperText={
+                      uploadStats.indeterminate
+                        ? undefined
+                        : t.uploadingBytes(uploadStats.loaded, uploadStats.total)
+                    }
+                    value={uploadStats.indeterminate ? undefined : uploadStats.pct}
+                    max={100}
+                  />
+                </div>
+              )}
+
+              {(ingestPhase === 'received' || ingestPhase === 'storing' || ingestPhase === 'extracting') && (
+                <div className="ingest-status">
+                  <ProgressBar
+                    label={
+                      ingestPhase === 'storing'
+                        ? t.phaseStoring
+                        : ingestPhase === 'extracting'
+                          ? t.phaseExtracting
+                          : t.receivedPhase(ingestFile)
+                    }
+                    helperText={undefined}
+                    value={undefined}
+                    max={100}
+                  />
+                  <Button kind="danger" size="sm" onClick={() => setCancelModal(true)}>
+                    {t.cancel}
+                  </Button>
                 </div>
               )}
 

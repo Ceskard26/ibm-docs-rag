@@ -10,3 +10,6 @@ PyJWT[crypto]==2.13.0
 beautifulsoup4==4.15.0
 requests==2.34.2
 playwright==1.60.0
+ibm-cos-sdk==2.14.0
+python-pptx==1.0.2
+cairosvg==2.8.2

@@ -1,0 +1,181 @@
+/* ============================================================
+   OrgTreeView — Carbon g100 compatible
+   Organigrama CSS puro: flex + borders, sin librerías externas.
+   ============================================================ */
+
+.org-tree-root {
+  padding: 1.5rem 0 2rem;
+}
+
+/* Banner de datos mock */
+.org-tree-banner {
+  margin-bottom: 2rem;
+}
+
+/* ---- Árbol ---- */
+.org-level {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* Fila de nodos hermanos al mismo nivel */
+.org-siblings {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0;
+  position: relative;
+}
+
+/* Línea horizontal que conecta a los hijos entre sí */
+.org-siblings::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: calc(50% - (var(--sibling-span, 100%) / 2));
+  width: var(--sibling-span, 100%);
+  height: 1px;
+  background: #4d4d4d;
+  pointer-events: none;
+}
+
+/* Sólo mostrar la barra horizontal cuando hay más de un hijo */
+.org-siblings.single-child::before {
+  display: none;
+}
+
+/* Contenedor de cada nodo + sus hijos */
+.org-branch {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0 0.75rem;
+  position: relative;
+}
+
+/* Conector vertical entre el padre y el nodo actual */
+.org-connector-top {
+  width: 1px;
+  height: 1.25rem;
+  background: #4d4d4d;
+  flex-shrink: 0;
+}
+
+/* Conector vertical entre el nodo y sus hijos */
+.org-connector-bottom {
+  width: 1px;
+  height: 1.25rem;
+  background: #4d4d4d;
+  flex-shrink: 0;
+}
+
+/* ---- Tarjeta de nodo ---- */
+.org-card {
+  background: #262626;
+  border: 1px solid #393939;
+  border-radius: 4px;
+  padding: 0.75rem 1rem;
+  min-width: 10rem;
+  max-width: 13rem;
+  text-align: center;
+  cursor: default;
+  transition: border-color 0.15s ease, background 0.15s ease;
+  user-select: none;
+}
+
+.org-card:focus {
+  outline: 2px solid #78a9ff;
+  outline-offset: 2px;
+}
+
+/* Nodo con hijos: clic para expandir/colapsar */
+.org-card.has-children {
+  cursor: pointer;
+}
+
+.org-card.has-children:hover {
+  border-color: #78a9ff;
+  background: #2d2d2d;
+}
+
+/* Nodo resaltado: el usuario logueado */
+.org-card.is-me {
+  border-color: #42be65;
+  background: #1c3a23;
+}
+
+.org-card.is-me:hover {
+  border-color: #6fdc8c;
+  background: #1f4128;
+}
+
+.org-card-name {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #f4f4f4;
+  margin: 0 0 0.25rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.org-card-role {
+  font-size: 0.75rem;
+  color: #c6c6c6;
+  margin: 0 0 0.5rem;
+  line-height: 1.35;
+}
+
+.org-card-area-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  flex-wrap: wrap;
+}
+
+.org-card-me-badge {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: #42be65;
+  background: rgba(66, 190, 101, 0.12);
+  border: 1px solid rgba(66, 190, 101, 0.3);
+  border-radius: 2px;
+  padding: 0 0.3rem;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+/* Indicador de colapso/expansión */
+.org-card-toggle {
+  font-size: 0.6875rem;
+  color: #78a9ff;
+  margin-top: 0.375rem;
+  display: block;
+}
+
+/* Sub-árbol de hijos */
+.org-children {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* ---- Responsive ---- */
+@media (max-width: 768px) {
+  .org-branch {
+    padding: 0 0.375rem;
+  }
+
+  .org-card {
+    min-width: 7.5rem;
+    max-width: 9.5rem;
+    padding: 0.5rem 0.625rem;
+  }
+
+  .org-card-name {
+    font-size: 0.8125rem;
+  }
+}

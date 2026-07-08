@@ -11,6 +11,18 @@ import { API_BASE } from './api'
 let config = { enabled: false }
 const TOKEN_KEY = 'ika-token'
 const USER_KEY = 'ika-user' // perfil (nombre/email), el access token no lo trae
+const LOGIN_AT_KEY = 'ika-login-at' // timestamp (Date.now()) del último login exitoso
+
+// La sesión restaurada de localStorage expira a las ~2h, aunque el access token
+// del backend siga siendo válido. Evita que una sesión quede "colgada" sin nombre
+// visible (perfil corrupto/ausente) o indefinidamente logueada.
+const SESSION_MAX_AGE_MS = 2 * 60 * 60 * 1000
+
+function clearSession() {
+  localStorage.removeItem(TOKEN_KEY)
+  localStorage.removeItem(USER_KEY)
+  localStorage.removeItem(LOGIN_AT_KEY)
+}
 
 export async function initAuth() {
   try {
@@ -35,8 +47,11 @@ export async function initAuth() {
       })
       if (!r.ok) throw new Error(`exchange ${r.status}: ${await r.text()}`)
       const data = await r.json()
+      // Guardamos el perfil ANTES de devolver, para que una sesión recién
+      // creada nunca quede sin `ika-user`/`ika-login-at` en localStorage.
       localStorage.setItem(TOKEN_KEY, data.token)
       localStorage.setItem(USER_KEY, JSON.stringify(data.user))
+      localStorage.setItem(LOGIN_AT_KEY, String(Date.now()))
       return { enabled: true, user: { ...data.user, token: data.token } }
     } catch (e) {
       console.error('[App ID] Falló el intercambio del código:', e)
@@ -48,25 +63,35 @@ export async function initAuth() {
   // el perfil guardado (nombre/email), que el access token no incluye.
   const token = localStorage.getItem(TOKEN_KEY)
   if (token) {
-    try {
-      const r = await fetch(`${API_BASE}/me`, { headers: { Authorization: `Bearer ${token}` } })
-      if (r.ok) {
-        const u = await r.json()
-        if (u.authenticated) {
-          let profile = {}
-          try {
-            profile = JSON.parse(localStorage.getItem(USER_KEY)) || {}
-          } catch {
-            /* ignore */
+    const loginAt = Number(localStorage.getItem(LOGIN_AT_KEY))
+    const sessionExpired = !loginAt || Date.now() - loginAt > SESSION_MAX_AGE_MS
+
+    if (!sessionExpired) {
+      try {
+        const r = await fetch(`${API_BASE}/me`, { headers: { Authorization: `Bearer ${token}` } })
+        if (r.ok) {
+          const u = await r.json()
+          if (u.authenticated) {
+            let profile = {}
+            try {
+              profile = JSON.parse(localStorage.getItem(USER_KEY)) || {}
+            } catch {
+              /* ignore */
+            }
+            const merged = { ...u, ...profile, token }
+            // Si el perfil restaurado no trae nombre (localStorage corrupto/vacío),
+            // tratamos la sesión como inválida en vez de mostrar un header sin nombre.
+            if (merged.name) {
+              return { enabled: true, user: merged }
+            }
           }
-          return { enabled: true, user: { ...u, ...profile, token } }
         }
+      } catch {
+        /* token vencido/ inválido */
       }
-    } catch {
-      /* token vencido/ inválido */
     }
-    localStorage.removeItem(TOKEN_KEY)
-    localStorage.removeItem(USER_KEY)
+
+    clearSession()
   }
 
   return { enabled: true, user: null }
@@ -84,7 +109,6 @@ export function login() {
 }
 
 export function logout() {
-  localStorage.removeItem(TOKEN_KEY)
-  localStorage.removeItem(USER_KEY)
+  clearSession()
   window.location.reload()
 }

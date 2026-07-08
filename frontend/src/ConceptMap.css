@@ -1,0 +1,80 @@
+/* ConceptMap — diagrama SVG radial para Carbon g100 */
+
+.conceptmap-container {
+  background: #161616;
+  border: 1px solid #393939;
+  border-radius: 8px;
+  padding: 0.5rem;
+  overflow: hidden;
+}
+
+.conceptmap-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+/* Aristas */
+.conceptmap-edge {
+  stroke: #4589ff;
+  stroke-width: 1.5;
+  stroke-opacity: 0.5;
+}
+
+.conceptmap-edge-label {
+  font-size: 10px;
+  fill: #8d8d8d;
+  font-family: inherit;
+}
+
+/* Nodo central */
+.conceptmap-center-node {
+  fill: #0f62fe;
+  stroke: #4589ff;
+  stroke-width: 2;
+}
+
+.conceptmap-center-label {
+  font-size: 13px;
+  font-weight: 600;
+  fill: #ffffff;
+  font-family: inherit;
+}
+
+/* Nodos satélite */
+.conceptmap-node {
+  fill: #262626;
+  stroke: #6f6f6f;
+  stroke-width: 1.5;
+  transition: fill 0.15s;
+}
+
+.conceptmap-node:hover {
+  fill: #393939;
+}
+
+.conceptmap-node-label {
+  font-size: 11px;
+  fill: #e0e0e0;
+  font-family: inherit;
+  pointer-events: none;
+}
+
+/* Fallback cuando el JSON no parsea */
+.conceptmap-fallback {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.conceptmap-raw {
+  white-space: pre-wrap;
+  line-height: 1.6;
+  color: #c6c6c6;
+  font-size: 0.875rem;
+  background: #161616;
+  border: 1px solid #393939;
+  border-radius: 4px;
+  padding: 1rem;
+  overflow-x: auto;
+}
