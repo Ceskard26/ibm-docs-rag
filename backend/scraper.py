@@ -272,6 +272,14 @@ GITHUB_PRODUCTS = [
     ("codeengine", "codeengine"),
     ("cloud-object-storage", "cloud-object-storage"),
     ("databases-for-postgresql", "databases-for-postgresql"),
+    # Prueba chica y controlada (2026-09-16): 3 productos nuevos del mirror de
+    # GitHub (de los ~230 repos disponibles en github.com/ibm-cloud-docs, ver
+    # docs/STATUS.md) para validar el pipeline de tagging/retrieval antes de
+    # una expansión más grande. 'Cloudant' con mayúscula = nombre exacto del
+    # repo (ver VALID_TAGS en main.py, el matching es sensible a mayúsculas).
+    ("appid", "appid"),
+    ("Cloudant", "Cloudant"),
+    ("key-protect", "key-protect"),
 ]
 
 # Tope de archivos por producto (controla costo de embeddings). Súbelo para más cobertura.
@@ -280,7 +288,11 @@ MAX_FILES_PER_PRODUCT = 30
 # Temas conceptuales/de inicio primero; archivos de ruido al final o excluidos.
 PRIORITY_PREFIXES = ("getting-started", "about", "overview", "what-is", "plan",
                      "faqs", "tutorial", "manage", "create", "use")
-SKIP_SUBSTRINGS = ("relnotes", "release-notes", "api-change-log", "changelog", "responsibilities")
+# "readme" agregado 2026-09-16: descubierto al probar 'Cloudant' (solo 5 temas)
+# que el README.md del repo NO es documentación real, es la descripción del
+# repo en sí ("Documentation source repository for..."), pero pasaba el filtro
+# de longitud (>=200 chars) e iba a parar a la BD como si fuera un doc más.
+SKIP_SUBSTRINGS = ("relnotes", "release-notes", "api-change-log", "changelog", "responsibilities", "readme")
 
 
 def clean_markdown(md: str) -> str:
@@ -306,7 +318,7 @@ def list_repo_topics(repo: str, branch: str = "master") -> list:
         name = path[:-3]
         if name.startswith("_") or name == "toc":
             continue
-        if any(s in name for s in SKIP_SUBSTRINGS):
+        if any(s in name.lower() for s in SKIP_SUBSTRINGS):
             continue
         files.append(name)
 

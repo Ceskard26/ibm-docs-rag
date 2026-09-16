@@ -1046,6 +1046,14 @@ def generate_response_stream(question: str, context: str, language: str = "auto"
 VALID_TAGS = {
     "watsonx", "vpc", "messages-for-rabbitmq", "containers",
     "codeengine", "cloud-object-storage", "databases-for-postgresql",
+    # Prueba chica y controlada (2026-09-16) de expansión de cobertura vía el
+    # mirror de GitHub (ver docs/STATUS.md) — el WAF de cloud.ibm.com/docs sigue
+    # bloqueando scraping en vivo, así que se valida el pipeline con 3 productos
+    # nuevos antes de considerar una expansión más grande a los ~230 repos
+    # disponibles en github.com/ibm-cloud-docs. 'Cloudant' con mayúscula: es el
+    # nombre EXACTO del repo en GitHub — _detect_product matchea el tag contra
+    # el segmento de la URL tal cual, sensible a mayúsculas.
+    "appid", "Cloudant", "key-protect",
 }
 
 
@@ -1089,6 +1097,9 @@ PRODUCT_DISPLAY_NAMES = {
     "codeengine": "Code Engine",
     "cloud-object-storage": "Cloud Object Storage",
     "databases-for-postgresql": "Databases for PostgreSQL",
+    "appid": "App ID",
+    "Cloudant": "Cloudant",
+    "key-protect": "Key Protect",
 }
 
 

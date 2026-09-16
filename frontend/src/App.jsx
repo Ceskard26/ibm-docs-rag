@@ -59,6 +59,9 @@ const PRODUCTS = [
   { id: 'codeengine', label: 'Code Engine' },
   { id: 'cloud-object-storage', label: 'Object Storage' },
   { id: 'databases-for-postgresql', label: 'Databases (PostgreSQL)' },
+  { id: 'appid', label: 'App ID' },
+  { id: 'Cloudant', label: 'Cloudant' },
+  { id: 'key-protect', label: 'Key Protect' },
 ]
 
 const T = {

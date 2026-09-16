@@ -218,6 +218,35 @@ funciona igual que antes (sin COS). `GET /files/<nombre>` devuelve 503 en ese ca
   (LibreOffice headless → PDF → inspección de imagen) en ambos temas, con grids 2x2 y fila de
   3, y casos límite de porcentaje (100%, 0.5%) antes de dar por cerrado. Detalle técnico y
   contrato de los layouts en `docs/GOVERNANCE.md`.
+- **WAF de IBM Docs — re-verificado (2026-09-16), sigue bloqueado**: probado en vivo con curl
+  (UA de navegador real) Y con el mismo Playwright headless que usa `scraper.py`.
+  `www.ibm.com/docs/` (catálogo enterprise completo) → 403 directo. `cloud.ibm.com/docs/...`
+  (IBM Cloud) → curl da 200 pero es el shell vacío de una SPA sin contenido; Playwright
+  headless (que sí podría renderizar el JS) es cortado por el WAF (`ERR_HTTP2_PROTOCOL_ERROR`
+  consistente en 3 intentos, timeout con HTTP/2 desactivado). Conclusión: la decisión de usar
+  el mirror de GitHub (ver más abajo) sigue siendo la correcta, nada cambió.
+- **Expansión de cobertura — prueba chica y controlada (2026-09-16), 3 productos nuevos**:
+  el mirror `github.com/ibm-cloud-docs` tiene **230 repos de producto** — solo 6 estaban
+  indexados (`GITHUB_PRODUCTS` en `scraper.py`). Se agregaron 3 para validar el pipeline
+  end-to-end antes de considerar una expansión grande: **App ID** (`appid`), **Cloudant**
+  (`Cloudant` — mayúscula, es el nombre EXACTO del repo; el matching de producto es sensible
+  a mayúsculas vía el patrón de la URL, ver `_detect_product` en `main.py`), **Key Protect**
+  (`key-protect`). Wireado completo: `VALID_TAGS`/`PRODUCT_DISPLAY_NAMES` (`main.py`),
+  `GITHUB_PRODUCTS` (`scraper.py`), dropdown de filtro (`frontend/src/App.jsx`). Ingesta de
+  prueba: 8 archivos por producto (Cloudant solo tiene 4 en total) → 626 chunks. Verificado
+  con preguntas reales sobre los 3 productos (similitud 0.61–0.83, fuentes correctas, prefijo
+  de producto en el embedding funcionando) y en el navegador con el filtro aplicado.
+  **Bug real encontrado de paso** (inspeccionando resultados de retrieval): el `README.md` de
+  cada repo (descripción del repo, NO documentación real — p.ej. "Documentation source
+  repository for...") pasaba el filtro de longitud (≥200 chars) y quedaba indexado como si
+  fuera contenido técnico; apareció como fuente de una respuesta real durante esta prueba.
+  Corregido en dos partes: `SKIP_SUBSTRINGS` en `scraper.py` ahora excluye `readme` (con
+  comparación case-insensitive, antes `"README"` con mayúscula no matcheaba nada) para
+  ingestas futuras, Y se borraron los 4 chunks de README ya indexados de antes (codeengine,
+  cloud-object-storage, messages-for-rabbitmq) — no eran candidatos nuevos, ya estaban
+  contaminando retrieval de los 6 productos originales sin que nadie lo hubiera notado.
+  **Pendiente de decisión de César**: expandir a más de los 230 repos disponibles, o dejarlo
+  así hasta después de la demo (recomendado, para no meter ruido de última hora).
 
 ## Pendiente (próximos pasos)
 1. **Deploy a Code Engine**: imágenes ya listas. Falta: secret del backend con las vars
