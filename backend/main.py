@@ -682,11 +682,14 @@ def _normalize(text: str) -> str:
     return re.sub(r"[^\w\s]", "", text).strip()
 
 
-def chitchat_reply(question: str, language: str):
-    """Si la entrada es un saludo/charla trivial, devuelve un mensaje de bienvenida."""
+def _is_greeting(question: str) -> tuple:
+    """Detecta si `question` es un saludo/charla trivial sin tema real (usada tanto
+    por `chitchat_reply` en mode standard como por `_no_topic_prompt` en los demás
+    modos). Devuelve (es_saludo: bool, palabras: set) — las palabras se reusan para
+    la heurística de idioma en ambos casos."""
     q = _normalize(question)
     if not q or len(q) > 40:
-        return None
+        return False, set()
     words = set(q.split())
     is_greeting = (
         q in GREETING_PHRASES
@@ -695,13 +698,57 @@ def chitchat_reply(question: str, language: str):
         # mensaje muy corto que contiene una palabra de saludo
         or (len(words) <= 3 and bool(words & GREETING_WORDS))
     )
+    return is_greeting, words
+
+
+def _greeting_language(language: str, words: set) -> str:
+    if language in WELCOME:
+        return language
+    return "en" if words & {"hi", "hello", "hey", "thanks", "sup", "thank"} else "es"
+
+
+def chitchat_reply(question: str, language: str):
+    """Si la entrada es un saludo/charla trivial, devuelve un mensaje de bienvenida.
+    Solo se usa en mode == 'standard' — ver `_no_topic_prompt` para los demás modos."""
+    is_greeting, words = _is_greeting(question)
     if not is_greeting:
         return None
-    if language in WELCOME:
-        lang = language
-    else:  # auto: heurística por idioma de la entrada
-        lang = "en" if words & {"hi", "hello", "hey", "thanks", "sup", "thank"} else "es"
-    return WELCOME[lang]
+    return WELCOME[_greeting_language(language, words)]
+
+
+# Modos ≠ standard tratan la entrada como una TAREA (generar un entregable), no
+# como conversación — por eso NO usan chitchat_reply/WELCOME (ver comentario en
+# /query, /query_stream: "un 'hola' en modo campaña genera campaña, no un saludo").
+# PERO un saludo puro ("hola", sin tema) no es una tarea real — sin este chequeo,
+# el retrieval corre igual sobre "hola" (sin ningún tema), trae los chunks que
+# sea más "parecidos" (ruido, casi al azar) y el modelo alucina un entregable de
+# la nada (bug real 2026-09-16: "hola" en modo presentación generó una
+# presentación sobre "Code Engine y Watsonx" sin que el usuario pidiera eso).
+# Este chequeo SOLO intercepta saludos puros — una tarea real como "crea una
+# presentación sobre Code Engine" sigue su camino normal, no dispara esto.
+NO_TOPIC_PROMPTS = {
+    "email":        {"es": "¡Hola! ¿Sobre qué tema quieres que redacte el correo?",
+                      "en": "Hi! What topic would you like the email to be about?"},
+    "campaign":     {"es": "¡Hola! ¿Sobre qué tema o producto armo la campaña?",
+                      "en": "Hi! What topic or product should the campaign be about?"},
+    "presentation": {"es": "¡Hola! ¿Sobre qué tema armo la presentación?",
+                      "en": "Hi! What topic should the presentation be about?"},
+    "conceptmap":   {"es": "¡Hola! ¿Sobre qué tema armo el mapa conceptual?",
+                      "en": "Hi! What topic should the concept map be about?"},
+}
+
+
+def _no_topic_prompt(mode: str, question: str, language: str):
+    """Equivalente a `chitchat_reply` para modos ≠ standard: si la entrada es un
+    saludo puro sin tema, pide el tema en vez de generar un entregable de la nada.
+    Devuelve None si no aplica (tarea real, con tema) — sigue el flujo normal."""
+    prompts = NO_TOPIC_PROMPTS.get(mode)
+    if prompts is None:
+        return None
+    is_greeting, words = _is_greeting(question)
+    if not is_greeting:
+        return None
+    return prompts[_greeting_language(language, words)]
 
 
 # Cuántos turnos previos de la conversación se consideran (control de tokens).
@@ -2963,18 +3010,23 @@ def query(payload: dict, user: dict = Depends(auth.get_current_user)):
     if authenticated:
         conversation_id, conv_created = get_or_create_conversation(user["sub"], conversation_id, question)
 
-    # Chitchat solo aplica en modo standard; los demás modos tratan la entrada como tarea.
+    # Chitchat solo aplica en modo standard; los demás modos tratan la entrada como
+    # tarea, PERO un saludo puro sin tema ("hola") en esos modos tampoco es una
+    # tarea real — ver _no_topic_prompt (bug real 2026-09-16: "hola" en modo
+    # presentación generaba una presentación alucinada de la nada).
     if mode == "standard":
         greeting = chitchat_reply(question, language)
-        if greeting is not None:
-            if authenticated:
-                save_messages(conversation_id, question, greeting, [], mode)
-            result = {"answer": greeting, "relevant": True, "chitchat": True,
-                      "max_similarity": 0.0, "threshold": MIN_SIMILARITY, "sources": [],
-                      "suggestions": []}
-            if authenticated:
-                result["conversation_id"] = conversation_id
-            return result
+    else:
+        greeting = _no_topic_prompt(mode, question, language)
+    if greeting is not None:
+        if authenticated:
+            save_messages(conversation_id, question, greeting, [], mode)
+        result = {"answer": greeting, "relevant": True, "chitchat": True,
+                  "max_similarity": 0.0, "threshold": MIN_SIMILARITY, "sources": [],
+                  "suggestions": []}
+        if authenticated:
+            result["conversation_id"] = conversation_id
+        return result
 
     # Reescribe la pregunta como query de búsqueda (memoria + reducción a intención +
     # sinónimos técnicos) y recupera con retrieval híbrido (semántico + léxico, RRF).
@@ -3047,25 +3099,30 @@ def query_stream(payload: dict, user: dict = Depends(auth.get_current_user)):
     if authenticated:
         conversation_id, conv_created = get_or_create_conversation(user["sub"], conversation_id, question)
 
-    # Chitchat solo aplica en modo standard; los demás modos tratan la entrada como tarea.
+    # Chitchat solo aplica en modo standard; los demás modos tratan la entrada como
+    # tarea, PERO un saludo puro sin tema ("hola") en esos modos tampoco es una
+    # tarea real — ver _no_topic_prompt (bug real 2026-09-16: "hola" en modo
+    # presentación generaba una presentación alucinada de la nada).
     if mode == "standard":
         greeting = chitchat_reply(question, language)
-        if greeting is not None:
-            def chitchat_stream():
-                # Línea aparte (simple de consumir en streaming) con el id de conversación,
-                # antes que nada más, para que el frontend lo guarde cuanto antes.
-                if authenticated:
-                    yield json.dumps({"type": "conversation", "conversation_id": conversation_id}) + "\n"
-                yield json.dumps({"type": "meta", "relevant": True, "chitchat": True,
-                                  "max_similarity": 0.0, "threshold": MIN_SIMILARITY,
-                                  "sources": []}) + "\n"
-                for word in greeting.split(" "):
-                    yield json.dumps({"type": "token", "text": word + " "}) + "\n"
-                    time.sleep(0.04)  # efecto "escribiendo" (el saludo es texto fijo, sin latencia del LLM)
-                if authenticated:
-                    save_messages(conversation_id, question, greeting, [], mode)
-                yield json.dumps({"type": "done"}) + "\n"
-            return StreamingResponse(chitchat_stream(), media_type="application/x-ndjson")
+    else:
+        greeting = _no_topic_prompt(mode, question, language)
+    if greeting is not None:
+        def chitchat_stream():
+            # Línea aparte (simple de consumir en streaming) con el id de conversación,
+            # antes que nada más, para que el frontend lo guarde cuanto antes.
+            if authenticated:
+                yield json.dumps({"type": "conversation", "conversation_id": conversation_id}) + "\n"
+            yield json.dumps({"type": "meta", "relevant": True, "chitchat": True,
+                              "max_similarity": 0.0, "threshold": MIN_SIMILARITY,
+                              "sources": []}) + "\n"
+            for word in greeting.split(" "):
+                yield json.dumps({"type": "token", "text": word + " "}) + "\n"
+                time.sleep(0.04)  # efecto "escribiendo" (el saludo es texto fijo, sin latencia del LLM)
+            if authenticated:
+                save_messages(conversation_id, question, greeting, [], mode)
+            yield json.dumps({"type": "done"}) + "\n"
+        return StreamingResponse(chitchat_stream(), media_type="application/x-ndjson")
 
     # Reescribe la pregunta como query de búsqueda (memoria + reducción a intención +
     # sinónimos técnicos) y recupera con retrieval híbrido (semántico + léxico, RRF).
