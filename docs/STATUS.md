@@ -229,6 +229,17 @@ funciona igual que antes (sin COS). `GET /files/<nombre>` devuelve 503 en ese ca
   400 chars + parte "palabras gigantes"; `embed_safe` divide si aún se pasa.
 - **En Code Engine NO setear `POSTGRES_CERT`** (el Dockerfile ya la fija a /app/postgres_cert.pem).
 - `_embeddings` se inicializa perezoso (un parpadeo de red no debe impedir arrancar el backend).
+- **`secure-infrastructure-vpc.pdf` eliminado de la BD (2026-09-16, 685 chunks).**
+  César probó producción y el link de esta fuente daba 404 — investigado: el
+  archivo se subió el 2026-07-02 durante el testing de la feature de Object
+  Storage/subida de PDFs (mismo patrón que los otros archivos de ruido
+  limpiados el 2026-09-15), NUNCA fue algo que César subiera a propósito, y
+  sus bytes nunca llegaron a COS (bucket confirmado vacío en `pdfs/`). Ni
+  César ni Claude tienen el PDF original. Se borró en vez de intentar
+  recuperarlo — la cobertura de VPC sigue sólida vía los 935 docs oficiales
+  de GitHub (`ibm-cloud-docs/vpc/...`), que sí tienen links funcionales.
+  Verificado sin regresión: preguntas de VPC siguen respondiendo con
+  similitud >=0.72 citando solo fuentes de GitHub.
 - **Latencia (medido 2026-09-16): instanciar `ModelInference`/abrir una conexión Postgres
   cuestan ~1-2s CADA VEZ, sin importar que sea el mismo proceso** — no es la llamada de
   red en sí (~0.4-0.5s), es la construcción del objeto/el handshake. `_chat_model()` ahora
