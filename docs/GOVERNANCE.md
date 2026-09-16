@@ -349,6 +349,16 @@ datos, un patrón) se registra como un ADR corto en `docs/adr/NNNN-titulo.md`:
   techo mensual fijo desde 2026-09-15; antes Lite se agotó en un día de testing intenso).
 - El **backend desplegado** debe redeployarse con credenciales nuevas tras rotarlas.
 - IBM Docs (cloud.ibm.com) tiene WAF → el contenido se toma de GitHub `ibm-cloud-docs`.
+- **`GITHUB_PRODUCTS`/`MAX_FILES_PER_PRODUCT` (scraper.py) — cobertura parcial por diseño:**
+  cada producto indexa como máximo `max_files` temas (default 30), elegidos por
+  `PRIORITY_PREFIXES` primero y alfabéticamente después. Para repos grandes (`vpc`: 651 temas,
+  `containers`: 427) esto deja fuera la mayoría del contenido — `PRIORITY_PREFIXES` incluye
+  `cli`/`update`/`upgrade`/`configure`/`troubleshoot`/`command` (2026-09-16, ver
+  `docs/STATUS.md`) precisamente para que las páginas de comandos/operación entren siempre,
+  pero temas fuera de esas categorías y fuera del alfabeto temprano pueden seguir sin
+  indexarse. Si una pregunta legítima no encuentra respuesta, antes de asumir que el modelo
+  falla, verificar si el tema simplemente no está en el subconjunto indexado (`SELECT DISTINCT
+  source FROM documents WHERE source LIKE '%ibm-cloud-docs/<repo>/%'`).
 - **`auth.get_current_user` con `AUTH_REQUIRED=false` (login opcional, como está hoy):**
   un token presente pero inválido/vencido cae a `ANONYMOUS`, NO devuelve 401 — bug real
   detectado 2026-09-16 (sesión IBMid vencida a mitad de uso hacía que `/query_stream`,

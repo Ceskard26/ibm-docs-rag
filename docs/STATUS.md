@@ -247,6 +247,25 @@ funciona igual que antes (sin COS). `GET /files/<nombre>` devuelve 503 en ese ca
   contaminando retrieval de los 6 productos originales sin que nadie lo hubiera notado.
   **Pendiente de decisión de César**: expandir a más de los 230 repos disponibles, o dejarlo
   así hasta después de la demo (recomendado, para no meter ruido de última hora).
+- **Bug real: comandos de CLI ausentes del índice, encontrado con una pregunta real de César
+  (2026-09-16)**: "¿cuál es el comando para actualizar la versión de Kubernetes?" — el comando
+  SÍ está en la documentación (`containers/update.md` trae `ibmcloud ks cluster master update`
+  literal), pero ese archivo nunca se indexaba. Causa: repos grandes (`containers` tiene 427
+  temas, `vpc` 651) solo tenían 4 temas matcheando `PRIORITY_PREFIXES`, así que el resto del
+  cupo (`max_files=30`) se llenaba alfabéticamente — "access-*"/"add-*" entraban antes de
+  llegar a la "u" de "update" o la "c" de "cli-*". Fix: `PRIORITY_PREFIXES` en `scraper.py`
+  ahora incluye `cli`, `update`, `upgrade`, `configure`, `troubleshoot`, `command` — estos
+  SIEMPRE entran en el lote prioritario sin importar el tamaño del repo. Reingesta completa de
+  los 6 productos originales con la prioridad corregida (`containers` solo, luego vpc/RabbitMQ/
+  Code Engine/Object Storage/PostgreSQL juntos) → +6094 chunks nuevos (DB total: 7253).
+  Ahora capturados: `containers/update.md` + `cli-map.md` + `cli-ks-plugin-v2.md` (663 chunks,
+  referencia completa del plugin `ibmcloud ks`), `cloud-object-storage-cli-reference.md` (246
+  chunks), `codeengine/troubleshoot-*.md` (9 páginas), `vpc/troubleshooting-*.md` (14 páginas),
+  `postgresql/howto-upgrading.md`, etc. Verificado con 3 preguntas reales en producción local
+  (Kubernetes, Object Storage, PostgreSQL) — todas responden con el comando/procedimiento
+  correcto citando la fuente; para PostgreSQL (que no se reduce a un solo comando) responde
+  correctamente el procedimiento multi-paso en vez de inventar un comando falso. Probado
+  también en el navegador con el filtro de producto puesto.
 
 ## Pendiente (próximos pasos)
 1. **Deploy a Code Engine**: imágenes ya listas. Falta: secret del backend con las vars

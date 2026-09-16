@@ -286,8 +286,20 @@ GITHUB_PRODUCTS = [
 MAX_FILES_PER_PRODUCT = 30
 
 # Temas conceptuales/de inicio primero; archivos de ruido al final o excluidos.
+# "cli"/"update"/"upgrade"/"configure"/"troubleshoot"/"command" agregados 2026-09-16:
+# bug real encontrado con una pregunta de prueba de César ("cuál es el comando para
+# actualizar la versión de Kubernetes") — el comando SÍ está en la documentación
+# (`containers/update.md` trae `ibmcloud ks cluster master update` literal), pero
+# ese archivo nunca se indexaba. Causa: repos grandes (containers tiene 427 temas,
+# vpc 651) solo tenían 4 temas matcheando las prioridades viejas, así que el resto
+# del cupo (`max_files`) se llenaba alfabéticamente — "access-*"/"add-*" entraban
+# antes de llegar a la "u" de "update" o la "c" de "cli-*". Los comandos de CLI son
+# justo lo que responde preguntas técnicas tipo "cuál es el comando para X", así
+# que estos prefijos ahora entran SIEMPRE en el lote prioritario, sin importar el
+# tamaño del repo.
 PRIORITY_PREFIXES = ("getting-started", "about", "overview", "what-is", "plan",
-                     "faqs", "tutorial", "manage", "create", "use")
+                     "faqs", "tutorial", "manage", "create", "use",
+                     "cli", "update", "upgrade", "configure", "troubleshoot", "command")
 # "readme" agregado 2026-09-16: descubierto al probar 'Cloudant' (solo 5 temas)
 # que el README.md del repo NO es documentación real, es la descripción del
 # repo en sí ("Documentation source repository for..."), pero pasaba el filtro
