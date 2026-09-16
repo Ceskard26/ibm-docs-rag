@@ -192,6 +192,20 @@ funciona igual que antes (sin COS). `GET /files/<nombre>` devuelve 503 en ese ca
   se pasa a la fase "processing" (sin cambios). Si `e.lengthComputable` es `false`, la
   `ProgressBar` de Carbon se muestra en modo indeterminado en vez de 0% congelado.
   Cancelar (abort del xhr + `/ingest_cancel`) intacto.
+- **Auto-clasificación de PDFs por IA (2026-09-16)**: el `tag` de `/ingest`/`/ingest_stream`
+  pasa de "categoría que el usuario elige" a **override opcional** — si no se manda `tag`
+  (o llega vacío/inválido), el backend llama a `_auto_detect_tag(full_text)` (una sola
+  llamada corta al `_chat_model()` singleton, `max_tokens=20`, `temperature=0`, sobre los
+  primeros ~3000 caracteres del texto YA extraído — no se vuelve a parsear el PDF) pidiendo
+  SOLO uno de los 7 IDs de `VALID_TAGS` o `none`. Misma whitelist estricta que el tag manual
+  (`_sanitize_tag`): cualquier respuesta fuera de los 7 IDs cae a `NULL`, la ingesta nunca
+  falla por esto. Si el usuario SÍ eligió una categoría en el dropdown, esa gana siempre
+  (el auto-detect ni se llama). Solo toca el camino de ingesta — `/query`/`/query_stream` no
+  se tocaron, verificado sin regresión de latencia (barrido de 7 productos, ~4.3s promedio
+  en estado estable, igual que antes). Frontend: copy del dropdown actualizado a "Categoría
+  (se detecta automáticamente; elige una para forzarla)" / opción por defecto ahora
+  "Detectar automáticamente" en vez de "Sin categoría" (mismo `id: ''`, sin cambio de
+  comportamiento de envío del form). Contrato completo en `docs/GOVERNANCE.md`.
 
 ## Pendiente (próximos pasos)
 1. **Deploy a Code Engine**: imágenes ya listas. Falta: secret del backend con las vars

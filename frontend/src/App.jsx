@@ -114,8 +114,8 @@ const T = {
     suggestionsLabel: 'También te podría interesar:',
     ingestTitle: 'Indexar un PDF',
     ingestHelp: 'Sube un documento técnico para ampliar la base de conocimiento.',
-    tagLabel: 'Categoría (opcional)',
-    noTag: 'Sin categoría',
+    tagLabel: 'Categoría (se detecta automáticamente; elige una para forzarla)',
+    noTag: 'Detectar automáticamente',
     uploadLabel: 'Arrastra un PDF aquí o haz clic para subir',
     uploadingPhase: (n) => `Subiendo ${n}…`,
     uploadingBytes: (loaded, total) => `Subiendo… ${formatMB(loaded)} MB / ${formatMB(total)} MB`,
@@ -235,8 +235,8 @@ const T = {
     suggestionsLabel: 'You might also want to ask:',
     ingestTitle: 'Index a PDF',
     ingestHelp: 'Upload a technical document to expand the knowledge base.',
-    tagLabel: 'Category (optional)',
-    noTag: 'No category',
+    tagLabel: 'Category (auto-detected; pick one to override)',
+    noTag: 'Auto-detect',
     uploadLabel: 'Drag a PDF here or click to upload',
     uploadingPhase: (n) => `Uploading ${n}…`,
     uploadingBytes: (loaded, total) => `Uploading… ${formatMB(loaded)} MB / ${formatMB(total)} MB`,
@@ -377,7 +377,7 @@ function App() {
   const [uploadStats, setUploadStats] = useState({ loaded: 0, total: 0, pct: 0, indeterminate: false })
   const [ingestProgress, setIngestProgress] = useState({ done: 0, total: 0 })
   const [ingestFile, setIngestFile] = useState('')
-  const [ingestTag, setIngestTag] = useState('') // categoría opcional del PDF a subir ('' = sin categoría)
+  const [ingestTag, setIngestTag] = useState('') // override opcional de categoría ('' = deja que el backend auto-detecte)
   const [cancelModal, setCancelModal] = useState(false)
   const [phraseIdx, setPhraseIdx] = useState(0)
   const abortRef = useRef(null)
@@ -414,8 +414,10 @@ function App() {
     id: p.id,
     label: p.id === 'all' ? t.allProducts : p.label,
   }))
-  // Igual que productItems pero sin 'all' (aquí la opción vacía es "sin categoría",
-  // no "todos los productos") — para el dropdown de categoría al subir un PDF.
+  // Igual que productItems pero sin 'all' (aquí la opción vacía deja que el
+  // backend auto-detecte el producto, no "todos los productos") — para el
+  // dropdown de categoría al subir un PDF. Elegir una categoría aquí es un
+  // override manual sobre la auto-detección (ver docs/GOVERNANCE.md).
   const tagItems = [
     { id: '', label: t.noTag },
     ...PRODUCTS.filter((p) => p.id !== 'all').map((p) => ({ id: p.id, label: p.label })),

@@ -1068,6 +1068,51 @@ def _product_title_prefix(source: str, tag: str = None) -> str:
     return PRODUCT_DISPLAY_NAMES.get(_detect_product(source, tag), "")
 
 
+# Auto-clasificación de PDFs subidos SIN categoría manual (ver /ingest,
+# /ingest_stream y docs/GOVERNANCE.md): el dropdown "Categoría" del uploader pasa
+# de obligatorio a override opcional — si el usuario no elige nada, el sistema
+# detecta el producto solo, en vez de dejar el chunk sin `tag`.
+def _auto_detect_tag(text: str) -> str:
+    """Detecta el producto (mismo espacio que VALID_TAGS) a partir de una MUESTRA
+    del texto ya extraído de un PDF (no vuelve a extraer nada). Una sola llamada
+    corta al modelo de chat — reusa el singleton `_chat_model()` (NO instancia uno
+    nuevo, ver comentario junto a `_chat_model_instance`), `max_tokens` bajo y
+    `temperature=0` porque es una clasificación puntual en la ingesta, no en el
+    camino de `/query`/`/query_stream` (no debe agregar latencia ahí).
+
+    Whitelist estricta IDÉNTICA a `_sanitize_tag`: cualquier respuesta del modelo
+    que no sea EXACTAMENTE uno de los 7 IDs de VALID_TAGS (o que no calce con
+    ninguno, `none`) se descarta como None — la ingesta NUNCA falla ni se bloquea
+    por esto, mismo principio que el tag manual.
+    """
+    sample = (text or "")[:3000].strip()
+    if not sample:
+        return None
+    options = "\n".join(
+        f"- {tag} ({PRODUCT_DISPLAY_NAMES[tag]})" for tag in sorted(VALID_TAGS)
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You classify a document excerpt into exactly ONE IBM Cloud product "
+                "ID, or 'none' if it does not clearly match any of them. Valid "
+                f"products:\n{options}\n\n"
+                "Reply with ONLY the product ID (e.g. 'containers') or the word "
+                "'none'. No explanation, no punctuation, no quotes, nothing else."
+            ),
+        },
+        {"role": "user", "content": f"Excerpt:\n{sample}\n\nProduct ID:"},
+    ]
+    try:
+        resp = _chat_model().chat(messages=messages, params={"max_tokens": 20, "temperature": 0})
+        raw = resp["choices"][0]["message"]["content"].strip().lower()
+    except Exception:
+        return None
+    raw = raw.strip(" .\"'`\n\t")
+    return _sanitize_tag(raw)
+
+
 def retrieve(question_embedding, products=None, limit=3):
     """Recupera los top-k chunks por similitud coseno pura, opcionalmente filtrados
     por producto. Se mantiene (sin usar en /query) como referencia/fallback y para
@@ -2710,6 +2755,13 @@ def ingest(file: UploadFile = File(...), tag: str = Form(None)):
             conn.commit()
         _cos_delete(old_source)
 
+    # Auto-clasificación: el tag manual (form) es un override — si el usuario no
+    # eligió categoría, el sistema detecta el producto solo a partir del texto ya
+    # extraído (ver _auto_detect_tag, docs/GOVERNANCE.md). Nunca sobrescribe un tag
+    # explícito.
+    if tag is None:
+        tag = _auto_detect_tag(full_text)
+
     # Chunking seguro (no se pasa de 512 tokens) y embeddings en lote (rápido + resiliente).
     # Título aproximado del PDF (primera línea de texto extraído, o el nombre de
     # archivo si no hay texto) + nombre de producto si el tag lo permite deducirlo
@@ -2761,6 +2813,7 @@ def ingest_stream(file: UploadFile = File(...), tag: str = Form(None)):
     tag = _sanitize_tag(tag)
 
     def gen():
+        nonlocal tag
         tmp_path = None
         try:
             yield json.dumps({"type": "received", "bytes": len(contents)}) + "\n"
@@ -2777,6 +2830,13 @@ def ingest_stream(file: UploadFile = File(...), tag: str = Form(None)):
             full_text = "\n".join(
                 page.extract_text() for page in reader.pages if page.extract_text()
             )
+
+            # Auto-clasificación: el tag manual (form) es un override — si el
+            # usuario no eligió categoría, el sistema detecta el producto solo a
+            # partir del texto ya extraído (ver _auto_detect_tag, docs/GOVERNANCE.md).
+            if tag is None:
+                tag = _auto_detect_tag(full_text)
+
             title = _extract_title(full_text, fallback=os.path.splitext(filename)[0])
             product_name = _product_title_prefix(filename, tag)
             chunks = chunk_text(full_text)

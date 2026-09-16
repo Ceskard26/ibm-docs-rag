@@ -154,15 +154,33 @@ datos, un patrón) se registra como un ADR corto en `docs/adr/NNNN-titulo.md`:
   GitHub/scraper y para PDFs subidos sin elegir categoría. Índice GIN
   `idx_documents_content_fts` sobre `to_tsvector('simple', content)` para el canal
   léxico del retrieval híbrido.
-- **`/ingest` y `/ingest_stream` — campo `tag` (opcional, form-data):** además de
-  `file`, ambos aceptan un campo `tag` opcional con un ID de producto (los mismos 7
-  del array `PRODUCTS` del frontend: `watsonx`, `vpc`, `messages-for-rabbitmq`,
-  `containers`, `codeengine`, `cloud-object-storage`, `databases-for-postgresql`).
-  Whitelist estricta en `_sanitize_tag`/`VALID_TAGS`: cualquier valor fuera de esa
-  lista (incluido vacío/ausente) se guarda como `NULL` — la ingesta NUNCA falla por
-  un tag inválido. El tag se guarda en cada chunk insertado de ese PDF y se usa en
+- **`/ingest` y `/ingest_stream` — campo `tag` (override opcional, form-data,
+  2026-09-16):** además de `file`, ambos aceptan un campo `tag` opcional con un ID
+  de producto (los mismos 7 del array `PRODUCTS` del frontend: `watsonx`, `vpc`,
+  `messages-for-rabbitmq`, `containers`, `codeengine`, `cloud-object-storage`,
+  `databases-for-postgresql`). Whitelist estricta en `_sanitize_tag`/`VALID_TAGS`:
+  cualquier valor fuera de esa lista (incluido vacío/ausente) se sanea a `None` —
+  la ingesta NUNCA falla por un tag inválido. **Si el `tag` enviado sanea a `None`**
+  (el usuario no eligió categoría en el dropdown, o mandó algo inválido), el
+  backend auto-detecta el producto con `_auto_detect_tag(full_text)`: una sola
+  llamada corta al `_chat_model()` (singleton compartido, no se instancia uno
+  nuevo) sobre los primeros ~3000 caracteres del texto YA extraído del PDF (mismo
+  `full_text`/`text` que ya se usa para trocear — no se vuelve a parsear nada),
+  `max_tokens=20`, `temperature=0`, pidiendo SOLO uno de los 7 IDs o la palabra
+  `none`. La respuesta del modelo pasa por la MISMA whitelist estricta
+  (`_sanitize_tag`) — cualquier cosa que no sea exactamente uno de los 7 IDs cae a
+  `NULL`, nunca bloquea ni falla la ingesta (mismo principio que el tag manual). Si
+  el `tag` enviado SÍ es válido, ese manda siempre y `_auto_detect_tag` ni se
+  llama (override explícito del usuario gana). El tag resultante (manual o
+  auto-detectado) se guarda en cada chunk insertado de ese PDF y se usa en
   `product_filter_sql` (ver retrieval híbrido) para que el PDF aparezca al filtrar
-  por ese producto, igual que los docs de GitHub.
+  por ese producto, igual que los docs de GitHub. Esta auto-clasificación ocurre
+  SOLO en el camino de ingesta (operación puntual) — no agrega ninguna llamada ni
+  latencia a `/query`/`/query_stream`. Frontend: el dropdown "Categoría" pasó de
+  obligatorio-implícito a override opcional (copy actualizado, ver
+  `docs/STATUS.md`); el comportamiento de envío del form no cambió (sigue
+  mandando `tag` solo si el usuario eligió explícitamente una categoría distinta
+  de la opción por defecto; vacío = deja que el backend auto-detecte).
 - **Retrieval híbrido (semántico + léxico, fusión max+bonus) — contrato de
   `/query`/`/query_stream`:** el retrieval en producción es `hybrid_retrieve()`
   (no `retrieve()`, que se conserva como fallback/comparación). Fusiona (a) top-15
