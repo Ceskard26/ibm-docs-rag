@@ -270,6 +270,84 @@
   min-height: 2rem;
 }
 
+/* Markdown acotado de las respuestas (ver Markdown.jsx) — negrita, código
+   inline/bloque, listas. Bug real 2026-09-16: los comandos de CLI mostraban
+   los ** y ``` literales porque el texto nunca se parseaba. */
+.markdown-body {
+  line-height: 1.6;
+}
+
+.markdown-body p {
+  margin: 0 0 0.85rem;
+}
+
+.markdown-body p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body ol,
+.markdown-body ul {
+  margin: 0 0 0.85rem;
+  padding-left: 1.5rem;
+}
+
+/* Carbon resetea list-style-type a 'none' globalmente (sus componentes propios
+   de lista dibujan el marcador ellos mismos) — sin esto, los pasos numerados
+   se veían como párrafos sueltos sin "1." "2." visibles. */
+.markdown-body ol {
+  list-style: decimal;
+}
+
+.markdown-body ul {
+  list-style: disc;
+}
+
+.markdown-body li {
+  margin-bottom: 0.4rem;
+}
+
+.markdown-body li:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body strong {
+  color: #f4f4f4;
+  font-weight: 600;
+}
+
+.markdown-body code {
+  font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.875em;
+  background: #262626;
+  border: 1px solid #393939;
+  border-radius: 4px;
+  padding: 0.05em 0.4em;
+  white-space: break-spaces;
+}
+
+.markdown-body pre {
+  margin: 0 0 0.85rem;
+  padding: 0.9rem 1rem;
+  background: #161616;
+  border: 1px solid #393939;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+.markdown-body pre:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  white-space: pre;
+  color: #e0e0e0;
+}
+
 .product-filter {
   min-width: 13rem;
 }

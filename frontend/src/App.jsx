@@ -38,6 +38,7 @@ import { initAuth, login, logout, clearSession } from './auth'
 import SlideDeck from './SlideDeck'
 import ConceptMap from './ConceptMap'
 import Dashboard from './Dashboard'
+import MarkdownText from './Markdown'
 import './App.css'
 
 const API_BASE = (
@@ -805,8 +806,8 @@ function App() {
         />
       )
     }
-    // standard | email | campaign — texto tal cual (pre-wrap)
-    return <p className="answer-text">{m.content}</p>
+    // standard | email | campaign — markdown acotado (negrita, código, listas)
+    return <MarkdownText text={m.content} />
   }
 
   function renderAssistant(m) {
