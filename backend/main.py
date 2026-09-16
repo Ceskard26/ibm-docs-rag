@@ -1839,11 +1839,25 @@ def _parse_slides(markdown: str) -> list:
         if 2 <= len(ordered) <= 6 and not bullets:
             steps = []
             for raw in ordered:
-                m = _KW_RE.match(raw)
-                if m:
-                    steps.append({"keyword": m.group(1).strip().rstrip(":"), "desc": m.group(2).strip()})
+                # El modelo genera pasos en CUALQUIERA de los dos formatos según
+                # el caso — con colon ("**Palabra**: resto", como _DEF_RE) o sin
+                # colon ("**Palabra** resto", como _KW_RE). Bug real 2026-09-16:
+                # _render_steps solo probaba _KW_RE, así que un paso con colon
+                # ("**Enfoque en el código**: desarrolla...") no matcheaba,
+                # caía al fallback de abajo y mostraba los ** literales en el
+                # deck. Prueba ambos formatos antes de rendirse.
+                dm = _DEF_RE.match(raw)
+                km = _KW_RE.match(raw)
+                if dm:
+                    kw = (dm.group(1) or dm.group(3) or "").strip()
+                    desc = (dm.group(2) or dm.group(4) or "").strip()
+                    steps.append({"keyword": kw, "desc": desc})
+                elif km:
+                    steps.append({"keyword": km.group(1).strip().rstrip(":"), "desc": km.group(2).strip()})
                 else:
-                    steps.append({"keyword": "", "desc": raw})
+                    # Último recurso: ni siquiera esto matcheó — no dejes que
+                    # ** crudos lleguen a la slide, aunque se pierda el bold.
+                    steps.append({"keyword": "", "desc": raw.replace("**", "")})
             slides.append({
                 "layout": "steps",
                 "title": title,
@@ -1910,6 +1924,32 @@ def _parse_slides(markdown: str) -> list:
             "paragraphs": paragraphs,
             "impact_text": "",
         })
+    return _diversify_defs_cards(slides)
+
+
+def _diversify_defs_cards(slides: list) -> list:
+    """Post-proceso determinístico de variedad visual (bug real 2026-09-16: el
+    prompt YA pide variedad explícitamente ("no repitas el mismo layout más de 2
+    veces", da ejemplos de divider/stats/steps/cards/defs/impact) pero el modelo
+    no lo respeta de forma confiable — un deck real de prueba salió con 4 de 6
+    slides en layout 'defs' (sin stats, sin cards, sin divisor). Confiar en que
+    el LLM se autorregule en una instrucción estructural larga es frágil; esto
+    lo garantiza por código en vez de seguir puliendo el prompt.
+
+    'defs' (`{"term","desc"}`) y 'cards' (`{"keyword","desc"}`) tienen la MISMA
+    forma de datos (solo cambia el nombre de la clave) — son intercambiables. Si
+    la 2ª+ slide 'defs' del deck tiene 3 o 4 items (rango que `_render_cards` ya
+    soporta bien, ver `_is_card_kw`), se convierte a 'cards' — alterna el estilo
+    visual a lo largo del deck sin depender de que el modelo elija bien."""
+    seen_defs = 0
+    for slide in slides:
+        if slide["layout"] != "defs":
+            continue
+        seen_defs += 1
+        n = len(slide.get("defs") or [])
+        if seen_defs >= 2 and 3 <= n <= 4:
+            slide["layout"] = "cards"
+            slide["cards"] = [{"keyword": d["term"], "desc": d["desc"]} for d in slide["defs"]]
     return slides
 
 
@@ -2283,12 +2323,17 @@ def _render_cards(sl, MARGIN_L, CONTENT_W, top, height, cards, tc, theme):
     rows = 1 if n == 3 else 2
     gap = Inches(0.3)
     card_w = (CONTENT_W - gap * (cols - 1)) / cols
-    # Techo de altura por tarjeta: con solo keyword + 1-2 líneas de desc no hace
-    # falta llenar todo el body (evita cajas con aire vacío al fondo).
-    max_card_h = Inches(1.7) if rows == 1 else Inches(2.15)
+    # Techo de altura por tarjeta: más alto que antes (1.7"/2.15" dejaba las
+    # tarjetas chicas y flotando en medio de mucho aire — bug de diseño real
+    # 2026-09-16, detectado inspeccionando un deck generado). Un poco de aire
+    # DENTRO de la tarjeta es normal en un diseño de cards; lo que se ve mal es
+    # la tarjeta entera flotando pequeña en medio de la slide.
+    max_card_h = Inches(2.4) if rows == 1 else Inches(2.6)
     card_h = min((height - gap * (rows - 1)) / rows, max_card_h)
-    grid_h = card_h * rows + gap * (rows - 1)
-    top = top + max(Inches(0), (height - grid_h) / 2)
+    # Ancla arriba (como 'defs'/'steps'), NO centra verticalmente: el aire
+    # sobrante queda abajo, consistente con el resto de layouts del deck —
+    # antes se repartía mitad arriba/mitad abajo, lo que se leía como que la
+    # slide "no sabía dónde poner el contenido".
     card_bg = "262626" if theme == "dark" else "F4F4F4"
 
     for i, card in enumerate(cards):
