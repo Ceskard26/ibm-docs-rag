@@ -309,9 +309,22 @@ datos, un patrón) se registra como un ADR corto en `docs/adr/NNNN-titulo.md`:
 
 ## 7. Riesgos / restricciones conocidas
 
-- **Cuota watsonx** (plan Lite = 300k tokens/mes). Toda ingesta masiva la aprueba el orquestador.
+- **Cuota watsonx** — instancia `watsonx-ika` en plan `v2-standard` (pay-as-you-go, sin
+  techo mensual fijo desde 2026-09-15; antes Lite se agotó en un día de testing intenso).
 - El **backend desplegado** debe redeployarse con credenciales nuevas tras rotarlas.
 - IBM Docs (cloud.ibm.com) tiene WAF → el contenido se toma de GitHub `ibm-cloud-docs`.
+- **`auth.get_current_user` con `AUTH_REQUIRED=false` (login opcional, como está hoy):**
+  un token presente pero inválido/vencido cae a `ANONYMOUS`, NO devuelve 401 — bug real
+  detectado 2026-09-16 (sesión IBMid vencida a mitad de uso hacía que `/query_stream`,
+  que no exige login, devolviera 401 y pareciera que "el backend no responde"; el diseño
+  de la app es justamente que corra anónima sin login válido). Endpoints que SÍ exigen
+  login (`_require_login`: `/conversations*`, `/feedback/stats`) siguen devolviendo su
+  propio 401/403 claro al recibir el usuario anónimo resultante — no se pierde
+  protección ahí. Solo con `AUTH_REQUIRED=true` un token inválido sigue dando 401 duro.
+  Frontend: `clearSession()` (exportada de `auth.js`) + `handleAuthExpired()` en
+  `App.jsx` limpian el estado local (sin recargar la página, a diferencia de `logout()`)
+  si `/conversations` responde 401 — evita mostrar "sesión iniciada" con una sesión ya
+  muerta por detrás.
 
 ## 8. Roadmap (alto nivel)
 

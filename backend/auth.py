@@ -104,7 +104,18 @@ def get_current_user(authorization: str = Header(default=None)) -> dict:
     try:
         claims = verify_token(token)
     except Exception as e:
-        raise HTTPException(status_code=401, detail=f"Token inválido: {e}")
+        # Con login OPCIONAL (AUTH_REQUIRED=false), un token inválido/vencido debe
+        # caer a anónimo — no bloquear con 401 — igual que si no hubiera llegado
+        # ningún token (caso de arriba). Bug real detectado 2026-09-16: sesión de
+        # IBMid vencida a mitad de uso hacía que /query_stream (que NO exige login)
+        # devolviera 401 y pareciera que "el backend no responde", cuando el diseño
+        # de la app es justamente que corra anónima sin login. Endpoints que SÍ
+        # requieren login (_require_login: /conversations, /feedback/stats) igual
+        # devuelven su propio 401 más claro ("requiere iniciar sesión") al recibir
+        # el usuario anónimo resultante — no se pierde protección ahí.
+        if AUTH_REQUIRED:
+            raise HTTPException(status_code=401, detail=f"Token inválido: {e}")
+        return ANONYMOUS
     return user_from_claims(claims)
 
 

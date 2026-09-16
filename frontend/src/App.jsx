@@ -34,7 +34,7 @@ import {
   UserAvatar,
   TrashCan,
 } from '@carbon/icons-react'
-import { initAuth, login, logout } from './auth'
+import { initAuth, login, logout, clearSession } from './auth'
 import SlideDeck from './SlideDeck'
 import ConceptMap from './ConceptMap'
 import Dashboard from './Dashboard'
@@ -439,11 +439,22 @@ function App() {
     return authUser?.token ? { Authorization: `Bearer ${authUser.token}` } : {}
   }
 
+  // El token guardado dejó de ser válido para el backend (sesión de IBMid vencida
+  // a mitad de uso, ej.) — limpia el estado local SIN recargar la página (a
+  // diferencia de logout(), que sí recarga) para no perder el chat en curso.
+  // El backend en sí ya cae a anónimo con gracia para /query* (ver auth.py); esto
+  // es solo para que la UI dele de mostrar "sesión iniciada" cuando ya no lo está.
+  function handleAuthExpired() {
+    clearSession()
+    setAuthUser(null)
+  }
+
   // Lista de conversaciones guardadas del usuario (solo con sesión iniciada).
   async function refreshConversations() {
     if (!authUser) return
     try {
       const res = await fetch(`${API_BASE}/conversations`, { headers: { ...authHeader() } })
+      if (res.status === 401) return handleAuthExpired()
       if (!res.ok) return
       setConversations(await res.json())
     } catch {

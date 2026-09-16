@@ -18,7 +18,7 @@ const LOGIN_AT_KEY = 'ika-login-at' // timestamp (Date.now()) del último login 
 // visible (perfil corrupto/ausente) o indefinidamente logueada.
 const SESSION_MAX_AGE_MS = 2 * 60 * 60 * 1000
 
-function clearSession() {
+export function clearSession() {
   localStorage.removeItem(TOKEN_KEY)
   localStorage.removeItem(USER_KEY)
   localStorage.removeItem(LOGIN_AT_KEY)
