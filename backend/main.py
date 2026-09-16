@@ -13,10 +13,11 @@ from dotenv import load_dotenv
 # en todo arranque que dependiera del .env.
 load_dotenv()
 
-from fastapi import FastAPI, UploadFile, File, Depends, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 import psycopg2
+import psycopg2.pool
 from psycopg2.extras import Json
 
 import auth
@@ -98,21 +99,76 @@ def _cos_delete(filename: str) -> None:
 # ────────────────────────────────────────────────────────────────────────────
 
 
+# Pool de conexiones (medido 2026-09-15/16): abrir una conexión nueva a Postgres
+# (TCP+TLS+auth contra un Postgres remoto de IBM Cloud) cuesta ~1s, cada vez —
+# antes de este fix, CADA llamada a get_db() pagaba ese costo íntegro, y un solo
+# request de un usuario logueado abre 3+ conexiones (retrieval, crear/obtener
+# conversación, guardar mensaje) = 3+ segundos solo en handshakes. Perezoso, con
+# el mismo motivo que embeddings/chat model: crearlo al importar rompería el
+# arranque si hay un parpadeo de red. minconn=1 para no pagar el costo si el
+# backend arranca y nadie pregunta nada todavía; maxconn=10 es generoso para el
+# tráfico de una demo (ajustar si Code Engine escala a más de una instancia
+# concurrente con carga real).
+_db_pool = None
+
+
+def _get_pool():
+    global _db_pool
+    if _db_pool is None:
+        _db_pool = psycopg2.pool.ThreadedConnectionPool(
+            1, 10,
+            os.getenv("POSTGRES_URL"),
+            sslrootcert=os.getenv("POSTGRES_CERT"),
+        )
+    return _db_pool
+
+
 def get_db():
-    conn = psycopg2.connect(
-        os.getenv("POSTGRES_URL"),
-        sslrootcert=os.getenv("POSTGRES_CERT")
-    )
+    """Toma una conexión del pool (no abre una nueva salvo que el pool esté
+    vacío/recién creado). `register_vector` se re-registra en cada préstamo:
+    es una consulta local rápida (no un round-trip caro como el handshake) y
+    garantiza que el adaptador esté activo sin importar qué conexión física del
+    pool haya tocado — necesario porque distintos préstamos pueden ser
+    conexiones físicas distintas."""
+    conn = _get_pool().getconn()
     register_vector(conn)
     return conn
 
 
+def _release_db(conn):
+    """Devuelve la conexión al pool en vez de cerrarla (ver get_db/_get_pool).
+
+    rollback() de seguridad ANTES de devolverla: si una query lanzó una
+    excepción a mitad de una transacción (sin `conn.commit()` del llamador), la
+    conexión queda en estado "transacción abortada" — con conexiones que se
+    cerraban siempre (antes de este fix) daba igual, se descartaban. Reusándolas
+    vía pool, una conexión así envenenaría al PRÓXIMO préstamo (todas sus
+    queries fallarían con "current transaction is aborted" hasta un rollback).
+    rollback() sobre una conexión sin transacción pendiente (ya comiteada o de
+    solo lectura) es inofensivo — no deshace nada real."""
+    try:
+        conn.rollback()
+    except Exception:
+        pass
+    try:
+        _get_pool().putconn(conn)
+    except Exception:
+        # Si el pool ya no existe (shutdown) o la conexión quedó en mal estado,
+        # cerrarla de verdad es un fallback seguro — nunca dejar la conexión
+        # colgando sin liberar.
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 @contextmanager
 def db_cursor():
-    """Conexión + cursor que se cierran SIEMPRE, aunque una query lance excepción.
+    """Conexión (del pool) + cursor que se liberan SIEMPRE, aunque una query
+    lance excepción.
 
     Sin esto, cualquier error a mitad de función dejaba la conexión Postgres
-    abierta (fuga de conexiones hasta agotar el pool del servidor).
+    sin devolver al pool (fuga de conexiones hasta agotar el pool del servidor).
     """
     conn = get_db()
     try:
@@ -122,7 +178,7 @@ def db_cursor():
         finally:
             cur.close()
     finally:
-        conn.close()
+        _release_db(conn)
 
 
 def init_db():
@@ -185,6 +241,12 @@ def init_db():
         # find_source_by_hash). NULL para chunks de GitHub/scraper (no aplica).
         cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS content_hash TEXT")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_documents_content_hash ON documents(content_hash)")
+
+        # Migración suave: categoría/producto opcional elegida al subir un PDF vía
+        # /ingest o /ingest_stream (ver VALID_TAGS y product_filter_sql). NULL para
+        # chunks de GitHub/scraper (no pasan por ese flujo) y para PDFs subidos sin
+        # elegir categoría — sin cambio de comportamiento para esos casos.
+        cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS tag TEXT")
 
         # Índice full-text (léxico) sobre el contenido, para el retrieval híbrido
         # (RRF, ver hybrid_retrieve). Config 'simple' a propósito: el corpus es
@@ -254,31 +316,88 @@ def chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) 
     return [c for c in chunks if c]
 
 
-def embed_safe(text: str, depth: int = 0) -> list:
-    """[(texto, embedding)], dividiendo si el chunk excede el límite de tokens."""
+def _extract_title(text: str, fallback: str = "") -> str:
+    """Título aproximado del documento, usado SOLO para prefijar el texto que se
+    embebe (nunca el `content` almacenado — ver docs/GOVERNANCE.md).
+
+    Markdown (GitHub docs): primera línea que empieza con '#'. Texto plano (PDFs,
+    pypdf no preserva Markdown): primera línea no vacía, acotada a 150 caracteres
+    para no inflar el presupuesto de tokens. Si no hay texto, usa `fallback`
+    (p.ej. el nombre de archivo)."""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            return line.lstrip("#").strip()[:150]
+        return line[:150]
+    return fallback
+
+
+def _needs_title_prefix(chunk: str, title: str) -> bool:
+    """False si el chunk ya empieza con el título (típicamente el chunk #0, que
+    arranca con '# Título...') — evita duplicarlo en el texto a embeber."""
+    if not title:
+        return False
+    head = chunk[: len(title) + 20].lower()
+    return title.lower() not in head
+
+
+def _prefixed(chunk: str, title: str, product_name: str = "") -> str:
+    """Texto a EMBEBER: `Nombre de producto — Título` + chunk. El `content`
+    guardado en BD sigue siendo `chunk` sin modificar — el prefijo solo mejora el
+    embedding, no la cita.
+
+    El nombre de producto (ver PRODUCT_DISPLAY_NAMES/_product_title_prefix) NO
+    está en el cuerpo del documento (solo vive en la URL del repo o el breadcrumb
+    del sitio), así que SIEMPRE se antepone, incluso al chunk #0 — es señal nueva,
+    no redundante. El título (H1) sí se omite si el chunk ya empieza con él."""
+    parts = []
+    if product_name:
+        parts.append(product_name)
+    if title and _needs_title_prefix(chunk, title):
+        parts.append(title)
+    if not parts:
+        return chunk
+    return " — ".join(parts) + "\n\n" + chunk
+
+
+def embed_safe(content: str, title: str = "", product_name: str = "", depth: int = 0) -> list:
+    """[(content, embedding)] embebiendo `producto — título + content`, dividiendo
+    el CONTENIDO (no el prefijo) si el texto combinado excede el límite de tokens
+    del modelo. `content` (lo que se guarda/cita) nunca lleva el prefijo."""
+    embed_text = _prefixed(content, title, product_name)
     try:
-        return [(text, get_embeddings_model().embed_documents(texts=[text])[0])]
+        return [(content, get_embeddings_model().embed_documents(texts=[embed_text])[0])]
     except Exception:
-        if depth > 6 or len(text) < 80:
+        if depth > 6 or len(content) < 80:
             return []
-        mid = len(text) // 2
-        split = text.rfind(" ", 0, mid)
+        mid = len(content) // 2
+        split = content.rfind(" ", 0, mid)
         if split <= 0:
             split = mid
-        return embed_safe(text[:split].strip(), depth + 1) + embed_safe(text[split:].strip(), depth + 1)
+        return (
+            embed_safe(content[:split].strip(), title, product_name, depth + 1)
+            + embed_safe(content[split:].strip(), title, product_name, depth + 1)
+        )
 
 
-def embed_chunks(chunks: list, batch: int = 64) -> list:
-    """Embeddings en sub-lotes; si un lote falla por un chunk denso, reintenta dividiendo."""
+def embed_chunks(chunks: list, title: str = "", product_name: str = "", batch: int = 64) -> list:
+    """[(content, embedding)] en sub-lotes, embebiendo cada chunk con `producto —
+    título` antepuesto (mejora la similitud de chunks que, aislados, pierden el
+    tema y/o el contexto de producto — ver docs/GOVERNANCE.md). El `content`
+    devuelto/almacenado es el chunk ORIGINAL, sin prefijo. Si un lote falla por un
+    chunk denso, reintenta dividiendo vía embed_safe."""
     pairs = []
     for i in range(0, len(chunks), batch):
         group = chunks[i:i + batch]
+        embed_texts = [_prefixed(c, title, product_name) for c in group]
         try:
-            embeddings = get_embeddings_model().embed_documents(texts=group)
+            embeddings = get_embeddings_model().embed_documents(texts=embed_texts)
             pairs.extend(zip(group, embeddings))
         except Exception:
             for c in group:
-                pairs.extend(embed_safe(c))
+                pairs.extend(embed_safe(c, title, product_name))
     return pairs
 
 
@@ -421,6 +540,81 @@ MODE_INSTRUCTIONS = {
         "Base the content entirely on the IBM documentation context provided."
     ),
 }
+
+# Instrucciones de sistema para los Casos A/B de _detect_ambiguity_or_scope (ver
+# docs/GOVERNANCE.md). Ortogonales a MODE_INSTRUCTIONS: solo se usan en mode ==
+# "standard", cuando el retrieval detecta ambigüedad real entre productos
+# cubiertos (Caso A) o relevancia mecánica sin relación temática plausible
+# (Caso B). Reemplazan TODO el system prompt normal para ese turno (no se
+# concatenan con SYSTEM_PROMPT) — ver _build_messages.
+SCOPE_INSTRUCTIONS = {
+    "ambiguous": (
+        "The retrieved context is split almost evenly between two different IBM "
+        "products this assistant covers: {products}. Neither clearly dominates, so "
+        "you cannot tell which product the user means. Do NOT answer the question "
+        "and do NOT invent or mix content from either product. Instead, reply with "
+        "ONLY a short, concrete clarifying question (1-2 sentences) that names both "
+        "candidate products and asks the user which one they meant."
+    ),
+    "out_of_scope": (
+        "The retrieved context does NOT plausibly answer the user's question — it "
+        "only matched on generic wording, not on the actual topic. Be explicitly "
+        "honest: clearly state that this specific topic is not among the products "
+        "this assistant covers ({covered_products}), without pretending otherwise. "
+        "Then, as possible partial help, briefly mention that there is a document "
+        "about \"{closest_source}\" that MIGHT be tangentially related, making clear "
+        "it is not a direct answer to the question and the user should double-check "
+        "it actually applies to their case. Do not present that source's content as "
+        "if it answered the question."
+    ),
+}
+
+# --- Preguntas de seguimiento sugeridas (Caso C, mode == "standard") ---------
+# Feature aditiva: NO gasta una llamada extra al LLM. Se le pide al modelo que,
+# en la MISMA generación de la respuesta, emita el marcador SUGGESTIONS_MARKER
+# seguido de 2-3 preguntas de seguimiento cortas. El backend hace streaming con
+# "hold-back" del marcador (ver query_stream/event_stream) para que ni el
+# marcador ni las sugerencias aparezcan mezclados en el texto visible mientras
+# "escribe" — solo se emiten como una línea NDJSON aparte, al final. Si el
+# modelo no lo genera o el parseo falla, simplemente no hay sugerencias: nunca
+# se rompe ni se corta la respuesta principal. Solo se activa en mode ==
+# "standard" y Caso C (ver _detect_ambiguity_or_scope) con contexto relevante
+# (ver want_suggestions en /query, /query_stream) — nunca en chitchat,
+# ambigüedad (Caso A), fuera de alcance (Caso B), ni otros `mode`.
+SUGGESTIONS_MARKER = "---SUGERENCIAS---"
+
+SUGGESTIONS_INSTRUCTION = (
+    "After writing your COMPLETE answer, on a new line output exactly this marker "
+    f"(verbatim, nothing before or after it on that line): {SUGGESTIONS_MARKER}\n"
+    "Then, after the marker, list 2 to 3 short natural follow-up questions the user "
+    "might reasonably ask next about this same topic, one per line, each starting "
+    "with '1.', '2.', '3.'. Write the follow-up questions in the SAME language as "
+    "your answer. Keep each under 12 words, and make them genuinely useful (not "
+    "generic). Output nothing else after the last question."
+)
+
+
+def _parse_suggestions(raw: str) -> list:
+    """Extrae hasta 3 preguntas de seguimiento del texto posterior al marcador
+    (ver SUGGESTIONS_MARKER). Tolerante al formato exacto del modelo (numeración
+    '1.'/'1)'/'-', comillas) — si no logra extraer nada devuelve []. Nunca lanza."""
+    if not raw:
+        return []
+    items = []
+    try:
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            line = re.sub(r"^[\-\*\d]+[\.\)]?\s*", "", line).strip().strip("\"'")
+            if line:
+                items.append(line)
+            if len(items) == 3:
+                break
+    except Exception:
+        return []
+    return items
+
 
 # Instrucciones de tono por audiencia (presentación).
 _AUDIENCE_INSTRUCTIONS = {
@@ -641,8 +835,34 @@ def search_query(question: str, history) -> str:
         return question
 
 
-def _build_messages(question: str, context: str, language: str, history=None, mode: str = "standard", presentation_opts: dict = None):
+def _build_messages(question: str, context: str, language: str, history=None, mode: str = "standard",
+                     presentation_opts: dict = None, scope=None, want_suggestions: bool = False):
     lang_instruction = LANGUAGE_INSTRUCTION.get(language, LANGUAGE_INSTRUCTION["auto"])
+
+    # Casos A/B (ver _detect_ambiguity_or_scope, docs/GOVERNANCE.md): reemplazan TODO
+    # el prompt normal para este turno. Solo puede venir no-None en mode == "standard"
+    # (el caller lo garantiza) — no se combina con MODE_INSTRUCTIONS.
+    if scope is not None:
+        scope_mode, scope_data = scope
+        if scope_mode == "ambiguous":
+            product_names = [PRODUCT_DISPLAY_NAMES.get(p, p) for p in scope_data["products"]]
+            instruction = SCOPE_INSTRUCTIONS["ambiguous"].format(products=" / ".join(product_names))
+            # Sin contexto: el modelo debe preguntar, no responder con contenido de
+            # ninguno de los dos productos en pugna todavía.
+            user_content = f"QUESTION: {question}"
+        else:  # "out_of_scope"
+            covered = ", ".join(PRODUCT_DISPLAY_NAMES.values())
+            closest_source = short_source(scope_data["source"])
+            instruction = SCOPE_INSTRUCTIONS["out_of_scope"].format(
+                covered_products=covered, closest_source=closest_source,
+            )
+            user_content = f"CONTEXT:\n{context}\n\nQUESTION: {question}" if context.strip() else f"QUESTION: {question}"
+        system = f"{instruction} {lang_instruction}"
+        messages = [{"role": "system", "content": system}]
+        messages.extend(_clean_history(history))
+        messages.append({"role": "user", "content": user_content})
+        return messages
+
     raw_mode_instruction = MODE_INSTRUCTIONS.get(mode, "")
     # Aplica presentation_opts solo en modo presentación
     if mode == "presentation" and raw_mode_instruction:
@@ -684,7 +904,12 @@ def _build_messages(question: str, context: str, language: str, history=None, mo
         user_content = f"QUESTION: {question}"
     else:
         extra = f" {mode_instruction}" if mode_instruction else ""
-        system = f"{SYSTEM_PROMPT} {lang_instruction}{extra}"
+        # Sugerencias de seguimiento: SOLO Caso C de mode=="standard" (ver
+        # SUGGESTIONS_INSTRUCTION) — el caller ya garantiza want_suggestions=True
+        # únicamente en ese caso, pero el chequeo de mode aquí es defensivo (nunca
+        # debe colarse en email/campaign/presentation/conceptmap).
+        suggestions_extra = f" {SUGGESTIONS_INSTRUCTION}" if (want_suggestions and mode == "standard") else ""
+        system = f"{SYSTEM_PROMPT} {lang_instruction}{extra}{suggestions_extra}"
         user_content = f"CONTEXT:\n{context}\n\nQUESTION: {question}"
     messages = [{"role": "system", "content": system}]
     messages.extend(_clean_history(history))  # turnos previos para dar contexto
@@ -692,19 +917,36 @@ def _build_messages(question: str, context: str, language: str, history=None, mo
     return messages
 
 
+# Modelo de chat reutilizable, igual patrón que get_embeddings_model() (línea
+# ~212): instanciar ModelInference cuesta ~1.5-2s (probado 2026-09-15/16, no es
+# la llamada de red del .chat() en sí —esa es ~0.4-0.5s—, es la construcción del
+# objeto). Antes de este fix, `_chat_model()` reconstruía el objeto en CADA
+# llamada, y una sola pregunta lo llama al menos 2 veces (search_query() +
+# generate_response/_stream()) — pagaba ese costo 2 veces por request. Perezoso
+# por el mismo motivo que embeddings: un objeto global creado al importar
+# rompería el arranque del backend si hay un parpadeo de red.
+_chat_model_instance = None
+
+
 def _chat_model():
-    return ModelInference(
-        model_id="meta-llama/llama-3-3-70b-instruct",
-        credentials=credentials,
-        project_id=project_id,
-    )
+    global _chat_model_instance
+    if _chat_model_instance is None:
+        _chat_model_instance = ModelInference(
+            model_id="meta-llama/llama-3-3-70b-instruct",
+            credentials=credentials,
+            project_id=project_id,
+        )
+    return _chat_model_instance
 
 
-def _mode_params(mode: str, presentation_opts: dict = None) -> dict:
+def _mode_params(mode: str, presentation_opts: dict = None, want_suggestions: bool = False) -> dict:
     """Devuelve los parámetros de inferencia según el modo.
 
     Para presentaciones con muchos slides (8 o 10) se sube max_tokens para evitar
-    truncamiento prematuro.
+    truncamiento prematuro. `want_suggestions` (solo mode=="standard") también
+    sube un poco el techo para dejar presupuesto al marcador + 2-3 preguntas de
+    seguimiento (ver SUGGESTIONS_INSTRUCTION) sin arriesgar cortar la respuesta
+    principal.
     """
     if mode == "conceptmap":
         return {"max_tokens": 600, "temperature": 0}
@@ -721,22 +963,27 @@ def _mode_params(mode: str, presentation_opts: dict = None) -> dict:
         return {"max_tokens": max_tokens, "temperature": 0.3}
     if mode == "campaign":
         return {"max_tokens": 900, "temperature": 0.3}
-    return {"max_tokens": 500, "temperature": 0.3}
+    base = 500
+    if mode == "standard" and want_suggestions:
+        base += 80
+    return {"max_tokens": base, "temperature": 0.3}
 
 
-def generate_response(question: str, context: str, language: str = "auto", history=None, mode: str = "standard", presentation_opts: dict = None):
+def generate_response(question: str, context: str, language: str = "auto", history=None, mode: str = "standard",
+                       presentation_opts: dict = None, scope=None, want_suggestions: bool = False):
     response = _chat_model().chat(
-        messages=_build_messages(question, context, language, history, mode, presentation_opts),
-        params=_mode_params(mode, presentation_opts),
+        messages=_build_messages(question, context, language, history, mode, presentation_opts, scope, want_suggestions),
+        params=_mode_params(mode, presentation_opts, want_suggestions),
     )
     return response["choices"][0]["message"]["content"].strip()
 
 
-def generate_response_stream(question: str, context: str, language: str = "auto", history=None, mode: str = "standard", presentation_opts: dict = None):
+def generate_response_stream(question: str, context: str, language: str = "auto", history=None, mode: str = "standard",
+                              presentation_opts: dict = None, scope=None, want_suggestions: bool = False):
     """Genera la respuesta token por token (para streaming)."""
     for chunk in _chat_model().chat_stream(
-        messages=_build_messages(question, context, language, history, mode, presentation_opts),
-        params=_mode_params(mode, presentation_opts),
+        messages=_build_messages(question, context, language, history, mode, presentation_opts, scope, want_suggestions),
+        params=_mode_params(mode, presentation_opts, want_suggestions),
     ):
         try:
             delta = chunk["choices"][0]["delta"].get("content", "")
@@ -746,18 +993,79 @@ def generate_response_stream(question: str, context: str, language: str = "auto"
             yield delta
 
 
+# Tags válidos para la columna `documents.tag` (categoría elegida al subir un PDF
+# vía /ingest o /ingest_stream). Deben coincidir con los IDs del array PRODUCTS en
+# frontend/src/App.jsx (sin 'all'). Whitelist estricta: ver _sanitize_tag.
+VALID_TAGS = {
+    "watsonx", "vpc", "messages-for-rabbitmq", "containers",
+    "codeengine", "cloud-object-storage", "databases-for-postgresql",
+}
+
+
+def _sanitize_tag(tag):
+    """Whitelist estricta: cualquier valor fuera de VALID_TAGS (incluido None,
+    string vacío, o basura) se guarda como NULL. La ingesta nunca falla por un
+    tag inválido — simplemente el chunk queda sin categoría, como hoy."""
+    return tag if tag in VALID_TAGS else None
+
+
 # Productos disponibles para filtrar. La clave identifica la fuente en la columna
 # `source`: 'watsonx' vive en www.ibm.com/.../watsonx/...; el resto en GitHub
-# ibm-cloud-docs/<producto>/...
+# ibm-cloud-docs/<producto>/... También matchea la columna `tag` (PDFs subidos
+# manualmente con esa categoría vía /ingest*, ver VALID_TAGS) — así un PDF
+# etiquetado "containers" aparece al filtrar por Kubernetes, igual que los docs
+# de GitHub. Los chunks con tag NULL (GitHub/scraper, o PDFs sin categoría) siguen
+# matcheando exactamente igual que antes, solo por el patrón de `source`.
 def product_filter_sql(products):
     """Devuelve (clausula_WHERE, params) para filtrar por producto. [] = sin filtro."""
     if not products:
         return "", []
     likes, params = [], []
     for p in products:
-        likes.append("source LIKE %s")
+        likes.append("(source LIKE %s OR tag = %s)")
         params.append("%/watsonx/%" if p == "watsonx" else f"%ibm-cloud-docs/{p}/%")
+        params.append(p)
     return "WHERE (" + " OR ".join(likes) + ")", params
+
+
+# Nombre legible por producto — el nombre real del servicio (p.ej. "Kubernetes
+# Service" para el repo `containers`) NO aparece en el markdown/H1 del documento
+# ni en el nombre de archivo de un PDF subido; solo vive en la URL del repo o en
+# el breadcrumb del sitio. Se antepone al título al calcular el embedding de cada
+# chunk (ver _prefixed) para que la similitud capture también el "de qué producto
+# es esto", no solo el tema de la página — ver docs/GOVERNANCE.md.
+PRODUCT_DISPLAY_NAMES = {
+    "watsonx": "watsonx.ai",
+    "vpc": "Virtual Private Cloud (VPC)",
+    "messages-for-rabbitmq": "Messages for RabbitMQ",
+    "containers": "Kubernetes Service",
+    "codeengine": "Code Engine",
+    "cloud-object-storage": "Cloud Object Storage",
+    "databases-for-postgresql": "Databases for PostgreSQL",
+}
+
+
+def _detect_product(source: str, tag: str = None) -> str:
+    """ID de producto (mismo espacio que VALID_TAGS) a partir de la fuente: `tag`
+    explícito (PDF subido con categoría) tiene prioridad; si no, se infiere del
+    patrón de URL — mismo criterio que product_filter_sql. None si no se puede
+    determinar (p.ej. PDF sin tag y sin patrón de URL reconocible)."""
+    if tag in VALID_TAGS:
+        return tag
+    if not source:
+        return None
+    if "/watsonx/" in source:
+        return "watsonx"
+    m = re.search(r"ibm-cloud-docs/([^/]+)/", source)
+    if m and m.group(1) in VALID_TAGS:
+        return m.group(1)
+    return None
+
+
+def _product_title_prefix(source: str, tag: str = None) -> str:
+    """Nombre legible del producto (ver PRODUCT_DISPLAY_NAMES) para anteponer al
+    título del chunk. Cadena vacía si no se puede determinar — no inventa."""
+    return PRODUCT_DISPLAY_NAMES.get(_detect_product(source, tag), "")
 
 
 def retrieve(question_embedding, products=None, limit=3):
@@ -777,10 +1085,23 @@ def retrieve(question_embedding, products=None, limit=3):
         return cur.fetchall()
 
 
-# RRF (Reciprocal Rank Fusion): constante estándar de la literatura (Cormack et al.
-# 2009) que amortigua el peso de rankings bajos; k=60 es el valor de facto usado en
-# la mayoría de sistemas de retrieval híbrido (Elasticsearch, Weaviate, etc.).
-RRF_K = 60
+# RRF (Reciprocal Rank Fusion): k amortigua el peso de rankings bajos. El valor
+# de facto de la literatura (Cormack et al. 2009, Elasticsearch/Weaviate) es
+# k=60, pensado para la suma aditiva clásica sobre ramas de cientos/miles de
+# candidatos. Con la fórmula max+bonus (ver hybrid_retrieve) y ramas angostas
+# (HYBRID_BRANCH_LIMIT=15), k=60 aplana tanto la diferencia entre rank 1 y
+# rank 15 (1/61 vs 1/75, ~23% de rango) que el término bonus (aun con un peso
+# moderado) le gana a la diferencia real entre "excelente en un canal" y
+# "mediocre en ambos" — el caso que esta fórmula debía arreglar. Bajado a k=8
+# (ajustado empíricamente, ver docs/GOVERNANCE.md): separa mejor rank 1 de
+# rank 15 (1/9 vs 1/23, ~2.5x) sin volverse tan agresivo que un rank 15 quede
+# en score ~0 (que rompería la fusión con ramas cortas). Verificado que NO
+# regresiona el caso léxico-puro (ver docstring de hybrid_retrieve).
+RRF_K = 8
+# Peso del canal "débil" en la fusión max+bonus (ver hybrid_retrieve). Sigue
+# premiando el doble-match (ambos canales) por encima de un match único, sin
+# dejar que dos matches mediocres le ganen a un match excelente en un solo canal.
+RRF_BONUS = 0.2
 # Cuántos candidatos se piden a cada rama (semántica/léxica) antes de fusionar.
 HYBRID_BRANCH_LIMIT = 15
 # Un match léxico se considera "fuerte" si cae en el top-N del ranking léxico
@@ -855,7 +1176,11 @@ def hybrid_retrieve(question: str, question_embedding, products=None, limit=5):
       (a) top-HYBRID_BRANCH_LIMIT por coseno (como antes, más ancho).
       (b) top-HYBRID_BRANCH_LIMIT por ts_rank con un tsquery OR de los términos
           de la query (ver _or_tsquery), respetando el mismo filtro de producto.
-      (c) fusión RRF: score(doc) = sum(1 / (RRF_K + rank_en_cada_lista)).
+      (c) fusión max+bonus (ver nota "Fórmula de fusión" abajo — reemplaza la suma
+          RRF pura): score(doc) = max(sem, lex) + RRF_BONUS * min(sem, lex), donde
+          sem = 1/(RRF_K+rank_semántico) si el doc apareció en ese canal, si no 0
+          (mismo criterio para lex). Si un doc solo aparece en un canal, el otro
+          término es 0 y el score queda en max(sem, lex) sin bonus.
       (d) dedupe por contenido idéntico (mismo texto de fuentes distintas — el caso
           del PDF subido dos veces — se queda con una sola entrada, la de mayor
           score fusionado).
@@ -864,9 +1189,29 @@ def hybrid_retrieve(question: str, question_embedding, products=None, limit=5):
           del léxico) y su rank/ts_rank léxico, para que build_query_payload pueda
           aplicar el criterio de relevancia documentado.
 
+    Fórmula de fusión (max + bonus, NO suma RRF pura — cambio 2026-09,
+    ver docs/GOVERNANCE.md): la suma aditiva clásica de RRF (score = sem + lex)
+    favorece sistemáticamente a un chunk "decente en ambos canales" por encima de
+    uno "excelente en un solo canal", porque dos términos medianos (p.ej.
+    1/65 + 1/65 ≈ 0.031) superan fácilmente a un término alto en solitario
+    (p.ej. 1/63 ≈ 0.0159 si el chunk NO aparece en el otro canal). Eso rompía el
+    caso real de una pregunta de Kubernetes parafraseada: el chunk correcto
+    rankeaba #3 puro-coseno (score semántico alto) pero su texto no contenía
+    literalmente ningún lexema de la query (sin stemming, config 'simple'), así
+    que perdía contra chunks con match léxico + semántico mediocres en ambos. A
+    la vez, el canal léxico existe PRECISAMENTE para el caso opuesto (una
+    pregunta parafraseada que embebe lejos de un chunk literal — p.ej. "comando
+    para conectarme a una máquina virtual" vs. un chunk con "ssh -i key.pem...")
+    y ESE caso necesita que un match léxico fuerte solo (sin apoyo semántico)
+    también rankee alto. `max(sem, lex) + RRF_BONUS * min(sem, lex)` resuelve
+    ambos: el máximo de los dos canales domina el score (premia la excelencia en
+    cualquiera de los dos), y el término bonus (min * 0.4) sigue premiando —pero
+    ya no permite ganar por sí solo— el caso de doble match, que sigue siendo la
+    señal más fuerte cuando ambos canales concuerdan.
+
     Devuelve: lista de tuplas (content, source, similarity, lexical_rank) ordenada
-    por score RRF descendente. lexical_rank es None si el doc no apareció en el
-    canal léxico (o no matcheó ningún término de la query).
+    por score de fusión descendente. lexical_rank es None si el doc no apareció en
+    el canal léxico (o no matcheó ningún término de la query).
     """
     clause, params = product_filter_sql(products)
     lexical_join = "AND" if clause else "WHERE"
@@ -899,15 +1244,24 @@ def hybrid_retrieve(question: str, question_embedding, products=None, limit=5):
             )
             lexical_rows = cur.fetchall()
 
-    # (c) RRF: acumular score por contenido (clave de dedupe = texto exacto, ver (d)).
-    # Guardamos también metadata (source, similarity, lexical_rank) de la MEJOR
-    # aparición de cada contenido, priorizando: similarity conocida > mayor rank.
-    fused = {}  # content -> {"score": float, "source": str, "similarity": float|None, "lexical_rank": int|None}
+    # (c) Fusión max+bonus (ver docstring arriba): acumular puntaje POR CANAL
+    # (sem_score/lex_score, no una sola suma) por contenido (clave de dedupe =
+    # texto exacto, ver (d)); el score final se calcula después de recorrer ambas
+    # ramas. Guardamos también metadata (source, similarity, lexical_rank) de la
+    # MEJOR aparición de cada contenido, priorizando: similarity conocida > mayor rank.
+    fused = {}  # content -> {"sem_score", "lex_score", "source", "similarity", "lexical_rank"}
 
     for rank, row in enumerate(semantic_rows, start=1):
         content, source, similarity = row
-        entry = fused.setdefault(content, {"score": 0.0, "source": source, "similarity": None, "lexical_rank": None})
-        entry["score"] += 1.0 / (RRF_K + rank)
+        entry = fused.setdefault(
+            content,
+            {"sem_score": 0.0, "lex_score": 0.0, "source": source, "similarity": None, "lexical_rank": None},
+        )
+        # max(), no =: el mismo `content` puede aparecer 2 veces bajo `source`
+        # distintos (PDF re-indexado con otro nombre, 42 casos en la BD hoy —
+        # QA 2026-09-15) y este dict dedupea por content; con `=` gana la ÚLTIMA
+        # aparición (el peor rank), penalizando contenido duplicado sin motivo.
+        entry["sem_score"] = max(entry["sem_score"], 1.0 / (RRF_K + rank))
         # Si ya había una entrada (llegó primero por léxico) sin similarity, o esta
         # tiene mejor rank semántico, actualizamos similarity/source.
         if entry["similarity"] is None or similarity > entry["similarity"]:
@@ -916,12 +1270,23 @@ def hybrid_retrieve(question: str, question_embedding, products=None, limit=5):
 
     for rank, row in enumerate(lexical_rows, start=1):
         content, source, ts_rank_val = row
-        entry = fused.setdefault(content, {"score": 0.0, "source": source, "similarity": None, "lexical_rank": None})
-        entry["score"] += 1.0 / (RRF_K + rank)
+        entry = fused.setdefault(
+            content,
+            {"sem_score": 0.0, "lex_score": 0.0, "source": source, "similarity": None, "lexical_rank": None},
+        )
+        entry["lex_score"] = max(entry["lex_score"], 1.0 / (RRF_K + rank))
         if entry["lexical_rank"] is None or rank < entry["lexical_rank"]:
             entry["lexical_rank"] = rank
         if entry["source"] is None:
             entry["source"] = source
+
+    # Score final: max(canal fuerte) + bonus * min(canal débil). Si un doc solo
+    # apareció en un canal, el otro queda en 0.0 y el score es solo el máximo (sin
+    # penalidad ni bonus) — ver docstring "Fórmula de fusión" arriba.
+    for entry in fused.values():
+        entry["score"] = max(entry["sem_score"], entry["lex_score"]) + RRF_BONUS * min(
+            entry["sem_score"], entry["lex_score"]
+        )
 
     # Para las entradas que llegaron SOLO por el canal léxico (similarity=None),
     # calculamos su similitud coseno real contra la pregunta embebida, para no
@@ -1000,7 +1365,11 @@ def build_query_payload(results, lenient=False):
     return {
         "context": context,
         "relevant": bool(context_rows),
-        "max_similarity": float(results[0][2]) if results else 0.0,
+        # max() real sobre TODAS las filas, no la similitud del ganador por fusión:
+        # con RRF_K=8 el rank-1 fusionado puede ser un chunk léxico-puro cuya
+        # similitud coseno es MENOR a la de otra fila del propio top-k — mostrar
+        # results[0][2] subestimaba max_similarity en la UI (QA 2026-09-15).
+        "max_similarity": max((float(r[2]) for r in results), default=0.0),
         "sources": [
             {
                 "content": r[0],
@@ -1011,6 +1380,153 @@ def build_query_payload(results, lenient=False):
             for r in results
         ],
     }
+
+
+# --- Ambigüedad / fuera-de-alcance real (Casos A/B, ver docs/GOVERNANCE.md) ---
+# Aplica SOLO en mode == "standard" (/query, /query_stream la invocan condicionadas
+# a eso). Es una capa ORTOGONAL a `mode` — no agrega un nuevo modo de chat, solo
+# cambia el system prompt de generación para ese turno (ver SCOPE_INSTRUCTIONS).
+
+# Caso B (fuera de alcance real): banda "débil" de similitud del top-1 relevante
+# —cerca de MIN_SIMILARITY pero no muy por encima— en la que un match mecánico
+# (léxico genérico o semántico al límite) es más probable que sea temáticamente
+# espurio que un match sólido.
+OUT_OF_SCOPE_SIMILARITY_LOW = MIN_SIMILARITY  # 0.72
+OUT_OF_SCOPE_SIMILARITY_HIGH = 0.78
+
+# Caso A (ambigüedad): diferencia de similitud entre el top-1 de un producto y el
+# top-1 de otro producto distinto, ambos dentro del top-3 fusionado, por debajo de
+# la cual se considera que "compiten" de verdad (ninguno domina claramente).
+AMBIGUITY_SIMILARITY_GAP = 0.03
+# Piso de similitud del producto mejor rankeado para que la ambigüedad cuente como
+# "real" (Caso A) en vez de ruido mecánico (Caso B). A PROPÓSITO igual a
+# OUT_OF_SCOPE_SIMILARITY_HIGH: los dos casos quedan mutuamente excluyentes por
+# construcción (rangos [0.72, 0.78] = Caso B "banda débil" vs > 0.78 = Caso A
+# "confianza real") — evita el falso positivo detectado en pruebas: la pregunta
+# de MongoDB (fuera de alcance real) generaba dos matches genéricos por la
+# palabra "backup" (RabbitMQ ~0.736, Cloud Object Storage ~0.725, gap < 0.03)
+# que con un piso más bajo (0.65) se leían como "ambigüedad real" entre esos dos
+# productos — incorrecto: ninguno de los dos tiene relación real con la
+# pregunta, es el caso B, no el A. Con el piso en 0.78 ese caso ahora cae
+# correctamente en Caso B (ver _detect_ambiguity_or_scope).
+AMBIGUITY_MIN_SIMILARITY = OUT_OF_SCOPE_SIMILARITY_HIGH
+
+# Sinónimos/variantes específicas por producto para detectar si la pregunta del
+# usuario nombra a alguno de los 7 productos cubiertos (Caso B). A propósito NO
+# incluye términos genéricos (p.ej. "base de datos"/"database" para Postgres,
+# "servidor"/"nube" para cualquiera): un término genérico haría que casi
+# cualquier pregunta "mencione" un producto y anularía la heurística — caso real
+# que motivó esto: "¿cómo hago backup de una base de datos MongoDB en IBM
+# Cloud?" NO debe contar como mención de Postgres solo por decir "base de datos".
+_PRODUCT_SYNONYMS = {
+    "watsonx": ["watsonx", "watson x"],
+    "vpc": ["vpc", "virtual private cloud", "red privada virtual"],
+    "messages-for-rabbitmq": ["rabbitmq", "rabbit mq"],
+    "containers": ["kubernetes", "k8s", "iks"],
+    "codeengine": ["code engine", "codeengine"],
+    "cloud-object-storage": ["cloud object storage", "object storage", "almacenamiento de objetos"],
+    "databases-for-postgresql": ["postgresql", "postgres"],
+}
+
+
+def _question_mentions_known_product(question: str) -> bool:
+    """True si la pregunta nombra explícitamente a alguno de los 7 productos
+    cubiertos (nombre visible en PRODUCT_DISPLAY_NAMES o una variante conocida
+    en _PRODUCT_SYNONYMS). Comparación insensible a acentos/mayúsculas (_normalize).
+
+    Se usa para el Caso B (fuera de alcance real): sin esto, cualquier pregunta
+    con vocabulario técnico genérico podría marcarse como fuera de alcance de más
+    — falso positivo, el peor error posible en esta heurística (ver
+    docs/GOVERNANCE.md, más conservador es mejor).
+    """
+    q = _normalize(question)
+    if not q:
+        return False
+    for names in _PRODUCT_SYNONYMS.values():
+        for name in names:
+            if _normalize(name) in q:
+                return True
+    for display in PRODUCT_DISPLAY_NAMES.values():
+        if _normalize(display) in q:
+            return True
+    return False
+
+
+def _detect_ambiguity_or_scope(rows, question: str):
+    """Detecta, sobre el top de `rows` (salida de hybrid_retrieve, ya ordenada por
+    score de fusión descendente), si aplica el Caso A (ambigüedad real entre 2+
+    productos cubiertos) o el Caso B (relevante=True mecánico pero sin relación
+    temática plausible con la pregunta). Devuelve `None` si no aplica ninguno
+    (Caso C: comportamiento normal, sin cambios).
+
+    Devuelve una tupla `(modo, data)`:
+      - `("ambiguous", {"products": [id1, id2]})`
+      - `("out_of_scope", {"source": source_del_top1_relevante, "similarity": float})`
+
+    SOLO debe llamarse en mode == "standard" (ver /query, /query_stream) — los
+    demás modos generan un entregable a partir de la tarea pedida, no una
+    respuesta conversacional, y no deben pedir aclaración ni activar el aviso de
+    fuera-de-alcance.
+
+    Heurística deliberadamente conservadora (ver docs/GOVERNANCE.md): un falso
+    positivo (marcar Caso A/B en una pregunta que en realidad es normal) es peor
+    que dejar pasar algún caso límite al comportamiento normal (Caso C) — por eso
+    ambos casos exigen primero que algo haya cruzado el umbral de relevancia
+    mecánicamente (ver _is_relevant_row), igual que hoy.
+    """
+    if not rows:
+        return None
+
+    relevant_rows = [r for r in rows if _is_relevant_row(r)]
+    if not relevant_rows:
+        # Nada cruzó el umbral: es el flujo normal de "sin información" que ya
+        # maneja _build_messages (contexto vacío) — no es un Caso A/B.
+        return None
+
+    # --- Caso A: ambigüedad real entre 2+ productos cubiertos ---
+    # Primer top-1 por producto distinto entre los primeros 3 resultados
+    # fusionados (ya vienen ordenados por score de fusión, no por similitud
+    # pura — aproximación razonable de "qué tan arriba salió cada producto").
+    seen = []
+    seen_ids = set()
+    for row in rows[:3]:
+        source, similarity = row[1], row[2]
+        product = _detect_product(source)
+        if product and product not in seen_ids:
+            seen_ids.add(product)
+            seen.append((product, similarity))
+    if len(seen) >= 2:
+        best_sim, second_sim = seen[0][1], seen[1][1]
+        # abs(): con RRF_K=8 un chunk léxico-puro puede subir al rank 1 con
+        # similitud MENOR a la del rank 2 (fusión por score, no por similitud) —
+        # sin abs(), ese caso da un gap negativo que "cuela" como < GAP y dispara
+        # ambigüedad aunque el segundo producto domine claramente (QA 2026-09-15).
+        gap_real = abs(best_sim - second_sim)
+        # Si la pregunta ya nombra explícitamente a UNO de los dos productos en
+        # pugna, no hay ambigüedad real — el usuario ya dijo cuál quiere (QA
+        # 2026-09-15: "¿cómo escalo un cluster de Kubernetes?" no debería
+        # preguntar "¿Kubernetes o VPC?").
+        q_norm = _normalize(question)
+        named = {
+            pid for pid in (seen[0][0], seen[1][0])
+            if any(_normalize(n) in q_norm for n in _PRODUCT_SYNONYMS.get(pid, []) + [PRODUCT_DISPLAY_NAMES.get(pid, "")])
+        }
+        if best_sim >= AMBIGUITY_MIN_SIMILARITY and gap_real < AMBIGUITY_SIMILARITY_GAP and not named:
+            return ("ambiguous", {"products": [seen[0][0], seen[1][0]]})
+
+    # --- Caso B: fuera de alcance real — DESACTIVADO (QA 2026-09-15) ---
+    # Sondeo empírico contra la BD real (12 preguntas): ~27% de falsos positivos
+    # en preguntas perfectamente en alcance y cortas ("como despliego una app",
+    # "cuanto cuesta el servicio") — la banda [0.72, 0.78] no distingue un match
+    # débil real de un buen match en español; el único filtro efectivo era que
+    # el usuario nombrara el producto literalmente. Auto-contradictorio en la UI
+    # (dice "no cubro esto" y muestra fuentes del producto correcto debajo) —
+    # riesgo inaceptable para la demo al CTO. Se deja el código y las constantes
+    # (OUT_OF_SCOPE_SIMILARITY_LOW/HIGH más arriba) para retomarlo después del
+    # 17 con una heurística mejor calibrada (ver docs/GOVERNANCE.md), en vez de
+    # borrarlo. El flujo "sin información" ya validado (contexto vacío en
+    # _build_messages) sigue cubriendo el caso real fuera de alcance (MongoDB).
+    return None
 
 
 def get_or_create_conversation(user_sub: str, conversation_id, question: str) -> tuple:
@@ -2168,7 +2684,8 @@ def _find_source_by_hash(content_hash: str, exclude_filename: str):
 
 
 @app.post("/ingest")
-def ingest(file: UploadFile = File(...)):
+def ingest(file: UploadFile = File(...), tag: str = Form(None)):
+    tag = _sanitize_tag(tag)
     contents = file.file.read()
     # Subida a COS best-effort (antes de procesar, para no perder el original si falla el parsing).
     _cos_upload(file.filename, contents)
@@ -2194,16 +2711,22 @@ def ingest(file: UploadFile = File(...)):
         _cos_delete(old_source)
 
     # Chunking seguro (no se pasa de 512 tokens) y embeddings en lote (rápido + resiliente).
+    # Título aproximado del PDF (primera línea de texto extraído, o el nombre de
+    # archivo si no hay texto) + nombre de producto si el tag lo permite deducirlo
+    # — se antepone SOLO al calcular el embedding de cada chunk, para que chunks
+    # intermedios no pierdan el tema ni el producto del documento.
+    title = _extract_title(full_text, fallback=os.path.splitext(file.filename)[0])
+    product_name = _product_title_prefix(file.filename, tag)
     chunks = chunk_text(full_text)
-    pairs = embed_chunks(chunks) if chunks else []
+    pairs = embed_chunks(chunks, title=title, product_name=product_name) if chunks else []
 
     with db_cursor() as (conn, cur):
         # Re-ingesta idempotente: subir el mismo PDF reemplaza en vez de duplicar.
         cur.execute("DELETE FROM documents WHERE source = %s", (file.filename,))
         for chunk, embedding in pairs:
             cur.execute(
-                "INSERT INTO documents (content, embedding, source, content_hash) VALUES (%s, %s, %s, %s)",
-                (chunk, embedding, file.filename, content_hash),
+                "INSERT INTO documents (content, embedding, source, content_hash, tag) VALUES (%s, %s, %s, %s, %s)",
+                (chunk, embedding, file.filename, content_hash, tag),
             )
         conn.commit()
 
@@ -2211,7 +2734,7 @@ def ingest(file: UploadFile = File(...)):
 
 
 @app.post("/ingest_stream")
-def ingest_stream(file: UploadFile = File(...)):
+def ingest_stream(file: UploadFile = File(...), tag: str = Form(None)):
     """Igual que /ingest pero reporta progreso por lote (para barra de progreso).
 
     Contrato NDJSON (ver docs/GOVERNANCE.md): el StreamingResponse se crea de
@@ -2235,6 +2758,7 @@ def ingest_stream(file: UploadFile = File(...)):
     """
     contents = file.file.read()
     filename = file.filename
+    tag = _sanitize_tag(tag)
 
     def gen():
         tmp_path = None
@@ -2253,6 +2777,8 @@ def ingest_stream(file: UploadFile = File(...)):
             full_text = "\n".join(
                 page.extract_text() for page in reader.pages if page.extract_text()
             )
+            title = _extract_title(full_text, fallback=os.path.splitext(filename)[0])
+            product_name = _product_title_prefix(filename, tag)
             chunks = chunk_text(full_text)
             content_hash = _pdf_content_hash(full_text)
 
@@ -2273,10 +2799,10 @@ def ingest_stream(file: UploadFile = File(...)):
                 batch = 32
                 for i in range(0, total, batch):
                     group = chunks[i:i + batch]
-                    for chunk, embedding in embed_chunks(group):
+                    for chunk, embedding in embed_chunks(group, title=title, product_name=product_name):
                         cur.execute(
-                            "INSERT INTO documents (content, embedding, source, content_hash) VALUES (%s, %s, %s, %s)",
-                            (chunk, embedding, filename, content_hash),
+                            "INSERT INTO documents (content, embedding, source, content_hash, tag) VALUES (%s, %s, %s, %s, %s)",
+                            (chunk, embedding, filename, content_hash, tag),
                         )
                     conn.commit()
                     done += len(group)
@@ -2384,7 +2910,8 @@ def query(payload: dict, user: dict = Depends(auth.get_current_user)):
             if authenticated:
                 save_messages(conversation_id, question, greeting, [], mode)
             result = {"answer": greeting, "relevant": True, "chitchat": True,
-                      "max_similarity": 0.0, "threshold": MIN_SIMILARITY, "sources": []}
+                      "max_similarity": 0.0, "threshold": MIN_SIMILARITY, "sources": [],
+                      "suggestions": []}
             if authenticated:
                 result["conversation_id"] = conversation_id
             return result
@@ -2395,7 +2922,22 @@ def query(payload: dict, user: dict = Depends(auth.get_current_user)):
         search_q = search_query(question, history)
         results = hybrid_retrieve(search_q, get_embedding(search_q), products)
         data = build_query_payload(results, lenient=(mode != "standard"))
-        answer = generate_response(question, data["context"], language, history, mode, presentation_opts)
+        # Casos A/B (ambigüedad / fuera de alcance real, ver docs/GOVERNANCE.md):
+        # capa ortogonal a `mode`, solo aplica en standard (los demás modos generan
+        # un entregable a partir de la tarea pedida, no una respuesta conversacional).
+        scope = _detect_ambiguity_or_scope(results, question) if mode == "standard" else None
+        # Sugerencias de seguimiento: SOLO Caso C de mode=="standard" (ni chitchat —
+        # ya manejado arriba—, ni Caso A/B, ni otros `mode`) con contexto relevante.
+        want_suggestions = mode == "standard" and scope is None and data["relevant"]
+        raw_answer = generate_response(question, data["context"], language, history, mode,
+                                        presentation_opts, scope, want_suggestions)
+        if want_suggestions and SUGGESTIONS_MARKER in raw_answer:
+            idx = raw_answer.index(SUGGESTIONS_MARKER)
+            answer = raw_answer[:idx].rstrip()
+            suggestions = _parse_suggestions(raw_answer[idx + len(SUGGESTIONS_MARKER):])
+        else:
+            answer = raw_answer
+            suggestions = []
     except Exception:
         # Sin esto quedaría una conversación vacía en "Mis conversaciones"
         # (ver delete_conversation_if_empty). El 500 sigue propagándose igual.
@@ -2412,6 +2954,14 @@ def query(payload: dict, user: dict = Depends(auth.get_current_user)):
         "max_similarity": data["max_similarity"],
         "threshold": MIN_SIMILARITY,
         "sources": data["sources"],
+        # Campo aditivo (ver docs/GOVERNANCE.md): True solo en el Caso A (pregunta
+        # de aclaración por ambigüedad entre productos). No cambia la forma del
+        # contrato existente; clientes que lo ignoren no se ven afectados.
+        "clarification": bool(scope) and scope[0] == "ambiguous",
+        # Campo aditivo: preguntas de seguimiento sugeridas (ver
+        # docs/GOVERNANCE.md, "Sugerencias de seguimiento"). Lista vacía si no
+        # aplica (chitchat/Caso A/B/otros modos) o si el parseo falló.
+        "suggestions": suggestions,
     }
     if authenticated:
         result["conversation_id"] = conversation_id
@@ -2463,6 +3013,13 @@ def query_stream(payload: dict, user: dict = Depends(auth.get_current_user)):
         search_q = search_query(question, history)
         results = hybrid_retrieve(search_q, get_embedding(search_q), products)
         data = build_query_payload(results, lenient=(mode != "standard"))
+        # Casos A/B (ambigüedad / fuera de alcance real, ver docs/GOVERNANCE.md):
+        # capa ortogonal a `mode`, solo aplica en standard (los demás modos generan
+        # un entregable a partir de la tarea pedida, no una respuesta conversacional).
+        scope = _detect_ambiguity_or_scope(results, question) if mode == "standard" else None
+        # Sugerencias de seguimiento: SOLO Caso C de mode=="standard" (ni chitchat —
+        # ya manejado arriba—, ni Caso A/B, ni otros `mode`) con contexto relevante.
+        want_suggestions = mode == "standard" and scope is None and data["relevant"]
     except Exception:
         # Falla antes de arrancar el stream: sin esto quedaría una conversación
         # vacía en "Mis conversaciones" (ver delete_conversation_if_empty).
@@ -2482,13 +3039,51 @@ def query_stream(payload: dict, user: dict = Depends(auth.get_current_user)):
             "threshold": MIN_SIMILARITY,
             "sources": data["sources"],
             "mode": mode,
+            # Campo aditivo (ver docs/GOVERNANCE.md): True solo en el Caso A
+            # (pregunta de aclaración por ambigüedad entre productos).
+            "clarification": bool(scope) and scope[0] == "ambiguous",
         }) + "\n"
-        # 2) tokens de la respuesta a medida que se generan (con historial)
+        # 2) tokens de la respuesta a medida que se generan (con historial).
+        # Si want_suggestions, el modelo puede emitir SUGGESTIONS_MARKER + preguntas
+        # al final de la MISMA generación (ver SUGGESTIONS_INSTRUCTION) — se hace
+        # streaming con "hold-back" de los últimos len(marcador)-1 caracteres del
+        # buffer sin flushear (algoritmo estándar de delimitador en streaming): así
+        # el marcador nunca puede aparecer parcialmente en el texto visible, ni
+        # aunque llegue partido entre dos deltas consecutivos del LLM. Cuando
+        # want_suggestions es False, hold=0 y el comportamiento es IDÉNTICO al
+        # anterior (flush inmediato, sin latencia añadida).
         acc = []
+        buf = ""
+        marker_found = False
+        suggestions_buf = ""
+        hold = (len(SUGGESTIONS_MARKER) - 1) if want_suggestions else 0
         try:
-            for delta in generate_response_stream(question, data["context"], language, history, mode, presentation_opts):
-                acc.append(delta)
-                yield json.dumps({"type": "token", "text": delta}) + "\n"
+            for delta in generate_response_stream(question, data["context"], language, history, mode,
+                                                    presentation_opts, scope, want_suggestions):
+                if marker_found:
+                    suggestions_buf += delta
+                    continue
+                buf += delta
+                if want_suggestions and SUGGESTIONS_MARKER in buf:
+                    idx = buf.index(SUGGESTIONS_MARKER)
+                    visible = buf[:idx]
+                    if visible:
+                        acc.append(visible)
+                        yield json.dumps({"type": "token", "text": visible}) + "\n"
+                    marker_found = True
+                    suggestions_buf = buf[idx + len(SUGGESTIONS_MARKER):]
+                    buf = ""
+                    continue
+                safe_len = len(buf) - hold
+                if safe_len > 0:
+                    visible = buf[:safe_len]
+                    buf = buf[safe_len:]
+                    acc.append(visible)
+                    yield json.dumps({"type": "token", "text": visible}) + "\n"
+            # Cola final: si nunca apareció el marcador, es texto visible normal.
+            if buf and not marker_found:
+                acc.append(buf)
+                yield json.dumps({"type": "token", "text": buf}) + "\n"
         except BaseException:
             # BaseException y no Exception: cubre también GeneratorExit (cliente
             # desconectado a mitad del stream), que igualmente deja la conversación
@@ -2496,9 +3091,18 @@ def query_stream(payload: dict, user: dict = Depends(auth.get_current_user)):
             if conv_created:
                 delete_conversation_if_empty(conversation_id)
             raise
+        clean_answer = "".join(acc)
         # 3) persistir el turno completo (solo autenticados) una vez terminó de generar
+        # — el marcador/las sugerencias NUNCA se persisten en messages.content.
         if authenticated:
-            save_messages(conversation_id, question, "".join(acc), data["sources"], mode, msg_meta)
+            save_messages(conversation_id, question, clean_answer, data["sources"], mode, msg_meta)
+        # 4) sugerencias de seguimiento, como línea aparte AL FINAL del stream (ver
+        # docs/GOVERNANCE.md). Solo se emite si se logró parsear al menos una —
+        # nunca rompe el flujo si el modelo no las generó o el parseo falló.
+        if marker_found:
+            suggestion_items = _parse_suggestions(suggestions_buf)
+            if suggestion_items:
+                yield json.dumps({"type": "suggestions", "items": suggestion_items}) + "\n"
         yield json.dumps({"type": "done"}) + "\n"
 
     return StreamingResponse(event_stream(), media_type="application/x-ndjson")
@@ -2520,6 +3124,62 @@ def _require_login(user: dict):
     """Estos endpoints solo tienen sentido con un usuario real (no anónimo)."""
     if user.get("sub") == "anonymous":
         raise HTTPException(status_code=401, detail="Esta función requiere iniciar sesión")
+
+
+# Cuántos 👎 recientes devuelve /feedback/stats (ver docstring del endpoint).
+FEEDBACK_STATS_RECENT_LIMIT = 50
+
+# Admins de /feedback/stats: lee preguntas/respuestas de TODOS los usuarios (posible
+# PII/contenido de cliente en los 👎), así que no basta con "estar logueado" (QA
+# 2026-09-15) — allowlist por email, configurable vía env, con default seguro.
+_FEEDBACK_ADMIN_EMAILS = {
+    e.strip().lower()
+    for e in os.getenv("FEEDBACK_ADMIN_EMAILS", "cesar.carrasco@ibm.com").split(",")
+    if e.strip()
+}
+
+
+def _require_feedback_admin(user: dict):
+    _require_login(user)
+    email = (user.get("email") or "").strip().lower()
+    if email not in _FEEDBACK_ADMIN_EMAILS:
+        raise HTTPException(status_code=403, detail="No autorizado para ver estas estadísticas")
+
+
+@app.get("/feedback/stats")
+def feedback_stats(user: dict = Depends(auth.get_current_user)):
+    """Uso interno (no para la demo, sin botón en el header — ver docs/GOVERNANCE.md
+    y docs/STATUS.md): agrega la tabla `feedback` para que César pueda revisar qué
+    respuestas fallaron. Requiere login Y estar en `_FEEDBACK_ADMIN_EMAILS` (401 si
+    anónimo, 403 si logueado pero no admin — ver docs/GOVERNANCE.md). Solo lectura."""
+    _require_feedback_admin(user)
+    with db_cursor() as (conn, cur):
+        cur.execute("SELECT COUNT(*) FROM feedback WHERE rating = 'up'")
+        total_up = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM feedback WHERE rating = 'down'")
+        total_down = cur.fetchone()[0]
+        cur.execute(
+            """SELECT COALESCE(language, 'unknown') AS lang,
+                      COUNT(*) FILTER (WHERE rating = 'up') AS up,
+                      COUNT(*) FILTER (WHERE rating = 'down') AS down
+               FROM feedback GROUP BY lang ORDER BY lang"""
+        )
+        by_language = [{"language": r[0], "up": r[1], "down": r[2]} for r in cur.fetchall()]
+        cur.execute(
+            """SELECT question, answer, created_at FROM feedback
+               WHERE rating = 'down' ORDER BY created_at DESC LIMIT %s""",
+            (FEEDBACK_STATS_RECENT_LIMIT,),
+        )
+        recent_negative = [
+            {"question": r[0], "answer": r[1], "created_at": r[2].isoformat()}
+            for r in cur.fetchall()
+        ]
+    return {
+        "total_up": total_up,
+        "total_down": total_down,
+        "by_language": by_language,
+        "recent_negative": recent_negative,
+    }
 
 
 @app.get("/conversations")

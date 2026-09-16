@@ -66,6 +66,89 @@ def chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) 
     return [c for c in chunks if c]
 
 
+# Nombre legible por producto (mismo mapeo que PRODUCT_DISPLAY_NAMES en main.py —
+# duplicado a propósito, igual que CHUNK_SIZE/embed_safe, para no acoplar este
+# script al import de main.py). El nombre real del servicio NO aparece en el
+# markdown/H1 del documento, solo en la URL del repo — ver _prefixed/_detect_product.
+PRODUCT_DISPLAY_NAMES = {
+    "watsonx": "watsonx.ai",
+    "vpc": "Virtual Private Cloud (VPC)",
+    "messages-for-rabbitmq": "Messages for RabbitMQ",
+    "containers": "Kubernetes Service",
+    "codeengine": "Code Engine",
+    "cloud-object-storage": "Cloud Object Storage",
+    "databases-for-postgresql": "Databases for PostgreSQL",
+}
+
+
+def _detect_product(source: str) -> str:
+    """ID de producto a partir de la URL fuente (repo de ibm-cloud-docs o
+    'watsonx' para las páginas de www.ibm.com/docs). None si no matchea."""
+    if not source:
+        return None
+    if "/watsonx/" in source:
+        return "watsonx"
+    m = re.search(r"ibm-cloud-docs/([^/]+)/", source)
+    if m and m.group(1) in PRODUCT_DISPLAY_NAMES:
+        return m.group(1)
+    return None
+
+
+def _product_title_prefix(source: str) -> str:
+    """Nombre legible del producto (ver PRODUCT_DISPLAY_NAMES). Cadena vacía si no
+    se puede determinar — no inventa."""
+    return PRODUCT_DISPLAY_NAMES.get(_detect_product(source), "")
+
+
+def _readable_source(source: str) -> str:
+    """Etiqueta corta y legible de la fuente (misma lógica que short_source() en
+    main.py) — usada como fallback de título cuando el texto no trae un '#'."""
+    m = re.search(r"ibm-cloud-docs/([^/]+)/blob/[^/]+/(.+)\.md$", source)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+    if "topic=" in source:
+        return source.split("topic=")[-1]
+    return source
+
+
+def _extract_title(text: str, fallback: str = "") -> str:
+    """Título aproximado del documento, usado SOLO para prefijar el texto que se
+    embebe (nunca el `content` almacenado — ver docs/GOVERNANCE.md). Markdown de
+    GitHub: primera línea que empieza con '#'. Si no hay, usa `fallback` (fuente
+    legible)."""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            return line.lstrip("#").strip()[:150]
+        return line[:150]
+    return fallback
+
+
+def _needs_title_prefix(chunk: str, title: str) -> bool:
+    """False si el chunk ya empieza con el título (típicamente el chunk #0)."""
+    if not title:
+        return False
+    head = chunk[: len(title) + 20].lower()
+    return title.lower() not in head
+
+
+def _prefixed(chunk: str, title: str, product_name: str = "") -> str:
+    """Texto a EMBEBER: `Nombre de producto — Título` + chunk. El `content`
+    guardado sigue siendo el chunk sin modificar. El nombre de producto no vive
+    en el cuerpo del documento (solo en la URL del repo), así que SIEMPRE se
+    antepone; el título (H1) se omite si el chunk ya empieza con él (chunk #0)."""
+    parts = []
+    if product_name:
+        parts.append(product_name)
+    if title and _needs_title_prefix(chunk, title):
+        parts.append(title)
+    if not parts:
+        return chunk
+    return " — ".join(parts) + "\n\n" + chunk
+
+
 def scrape_page(page, url: str) -> str:
     """Carga una URL en una página de Playwright y devuelve el texto principal.
 
@@ -136,21 +219,34 @@ def scrape_and_ingest(urls: list):
 
             chunks = chunk_text(texto)
             print(f"  {len(chunks)} chunks")
+            # Título del documento + nombre de producto (antepuestos SOLO al texto
+            # que se embebe, para que chunks intermedios no pierdan el tema ni el
+            # producto — ver docs/GOVERNANCE.md).
+            title = _extract_title(texto, fallback=_readable_source(url))
+            product_name = _product_title_prefix(url)
 
             # Re-ingesta idempotente: elimina chunks previos de esta misma URL para
             # no acumular duplicados al re-ejecutar el scraper.
             cur.execute("DELETE FROM documents WHERE source = %s", (url,))
 
-            # Embeddings en lote (más rápido y menos llamadas a la API).
-            embeddings = embedding_model.embed_documents(texts=chunks)
-            for chunk, embedding in zip(chunks, embeddings):
+            # Embeddings en lote (más rápido y menos llamadas a la API); si el lote
+            # falla por un chunk denso, reintenta chunk por chunk dividiendo.
+            embed_texts = [_prefixed(c, title, product_name) for c in chunks]
+            try:
+                embeddings = embedding_model.embed_documents(texts=embed_texts)
+                pairs = list(zip(chunks, embeddings))
+            except Exception:
+                pairs = []
+                for c in chunks:
+                    pairs.extend(embed_safe(embedding_model, c, title, product_name))
+            for chunk, embedding in pairs:
                 cur.execute(
                     "INSERT INTO documents (content, embedding, source) VALUES (%s, %s, %s)",
                     (chunk, embedding, url),
                 )
 
             conn.commit()
-            total_chunks += len(chunks)
+            total_chunks += len(pairs)
             print("  Indexado")
 
         browser.close()
@@ -257,21 +353,24 @@ def ingest_github(products=None, max_files: int = MAX_FILES_PER_PRODUCT):
     ingest_texts(items)
 
 
-def embed_safe(embedding_model, text: str, depth: int = 0) -> list:
-    """Devuelve [(texto, embedding)], dividiendo el texto si excede el límite de tokens."""
+def embed_safe(embedding_model, content: str, title: str = "", product_name: str = "", depth: int = 0) -> list:
+    """[(content, embedding)] embebiendo `producto — título + content`, dividiendo
+    el CONTENIDO (no el prefijo) si el texto combinado excede el límite de tokens.
+    `content` (lo que se guarda/cita) nunca lleva el prefijo."""
+    embed_text = _prefixed(content, title, product_name)
     try:
-        emb = embedding_model.embed_documents(texts=[text])[0]
-        return [(text, emb)]
+        emb = embedding_model.embed_documents(texts=[embed_text])[0]
+        return [(content, emb)]
     except Exception:
-        if depth > 6 or len(text) < 80:
+        if depth > 6 or len(content) < 80:
             return []  # fragmento irreducible: se descarta
-        mid = len(text) // 2
-        split = text.rfind(" ", 0, mid)
+        mid = len(content) // 2
+        split = content.rfind(" ", 0, mid)
         if split <= 0:
             split = mid
         return (
-            embed_safe(embedding_model, text[:split].strip(), depth + 1)
-            + embed_safe(embedding_model, text[split:].strip(), depth + 1)
+            embed_safe(embedding_model, content[:split].strip(), title, product_name, depth + 1)
+            + embed_safe(embedding_model, content[split:].strip(), title, product_name, depth + 1)
         )
 
 
@@ -300,15 +399,21 @@ def ingest_texts(items: list):
         chunks = chunk_text(text)
         if not chunks:
             continue
+        # Título del documento + nombre de producto (antepuestos SOLO al texto que
+        # se embebe, para que chunks intermedios no pierdan el tema ni el producto
+        # — ver docs/GOVERNANCE.md).
+        title = _extract_title(text, fallback=_readable_source(source))
+        product_name = _product_title_prefix(source)
         # Embedding en lote; si el lote falla (algún chunk muy denso), se reintenta
         # chunk por chunk dividiendo los que excedan el límite de tokens.
+        embed_texts = [_prefixed(c, title, product_name) for c in chunks]
         try:
-            embeddings = embedding_model.embed_documents(texts=chunks)
+            embeddings = embedding_model.embed_documents(texts=embed_texts)
             pairs = list(zip(chunks, embeddings))
         except Exception:
             pairs = []
             for c in chunks:
-                pairs.extend(embed_safe(embedding_model, c))
+                pairs.extend(embed_safe(embedding_model, c, title, product_name))
 
         cur.execute("DELETE FROM documents WHERE source = %s", (source,))
         for chunk, embedding in pairs:

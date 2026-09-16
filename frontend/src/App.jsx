@@ -37,6 +37,7 @@ import {
 import { initAuth, login, logout } from './auth'
 import SlideDeck from './SlideDeck'
 import ConceptMap from './ConceptMap'
+import Dashboard from './Dashboard'
 import './App.css'
 
 const API_BASE = (
@@ -99,6 +100,9 @@ const T = {
     noMatchTitle: 'Sin coincidencias relevantes',
     noMatchSub:
       'La base de conocimiento no contiene información que supere el umbral de relevancia para esta pregunta.',
+    clarificationTitle: 'Pregunta de aclaración',
+    clarificationSub:
+      'Tu pregunta podría referirse a más de un producto — el asistente te pide precisarlo antes de responder.',
     answer: 'Respuesta',
     sources: 'Fuentes',
     similarity: 'similitud',
@@ -107,8 +111,11 @@ const T = {
     copied: '¡Copiado!',
     helpful: '¿Te sirvió?',
     thanks: '¡Gracias!',
+    suggestionsLabel: 'También te podría interesar:',
     ingestTitle: 'Indexar un PDF',
     ingestHelp: 'Sube un documento técnico para ampliar la base de conocimiento.',
+    tagLabel: 'Categoría (opcional)',
+    noTag: 'Sin categoría',
     uploadLabel: 'Arrastra un PDF aquí o haz clic para subir',
     uploadingPhase: (n) => `Subiendo ${n}…`,
     uploadingBytes: (loaded, total) => `Subiendo… ${formatMB(loaded)} MB / ${formatMB(total)} MB`,
@@ -161,6 +168,20 @@ const T = {
     themeLabel: 'Tema',
     themeDark: 'Oscuro',
     themeLight: 'Claro',
+    dashboardTitle: 'Panel de feedback',
+    dashboardSubtitle: 'Uso interno — revisión de calidad de respuestas (no forma parte de la demo).',
+    dashboardLoginRequired: 'Inicia sesión para ver el panel de feedback.',
+    dashboardLoading: 'Cargando estadísticas…',
+    dashboardError: 'No se pudieron cargar las estadísticas.',
+    dashboardTotal: 'Total de feedback',
+    dashboardTotalUp: '👍 Positivos',
+    dashboardTotalDown: '👎 Negativos',
+    dashboardByLanguage: 'Por idioma',
+    dashboardRecentNegative: 'Últimos 👎 (más recientes primero)',
+    dashboardNoNegative: 'Sin registros.',
+    dashboardQuestion: 'Pregunta',
+    dashboardDate: 'Fecha',
+    dashboardBackToChat: '← Volver al chat',
   },
   en: {
     product: 'Knowledge Agent',
@@ -200,6 +221,9 @@ const T = {
     noMatchTitle: 'No relevant matches',
     noMatchSub:
       'The knowledge base has no information above the relevance threshold for this question.',
+    clarificationTitle: 'Clarifying question',
+    clarificationSub:
+      'Your question could apply to more than one product — the assistant is asking you to specify before answering.',
     answer: 'Answer',
     sources: 'Sources',
     similarity: 'similarity',
@@ -208,8 +232,11 @@ const T = {
     copied: 'Copied!',
     helpful: 'Helpful?',
     thanks: 'Thanks!',
+    suggestionsLabel: 'You might also want to ask:',
     ingestTitle: 'Index a PDF',
     ingestHelp: 'Upload a technical document to expand the knowledge base.',
+    tagLabel: 'Category (optional)',
+    noTag: 'No category',
     uploadLabel: 'Drag a PDF here or click to upload',
     uploadingPhase: (n) => `Uploading ${n}…`,
     uploadingBytes: (loaded, total) => `Uploading… ${formatMB(loaded)} MB / ${formatMB(total)} MB`,
@@ -262,6 +289,20 @@ const T = {
     themeLabel: 'Theme',
     themeDark: 'Dark',
     themeLight: 'Light',
+    dashboardTitle: 'Feedback dashboard',
+    dashboardSubtitle: 'Internal use — answer quality review (not part of the demo).',
+    dashboardLoginRequired: 'Sign in to view the feedback dashboard.',
+    dashboardLoading: 'Loading stats…',
+    dashboardError: 'Could not load the stats.',
+    dashboardTotal: 'Total feedback',
+    dashboardTotalUp: '👍 Positive',
+    dashboardTotalDown: '👎 Negative',
+    dashboardByLanguage: 'By language',
+    dashboardRecentNegative: 'Recent 👎 (most recent first)',
+    dashboardNoNegative: 'No records.',
+    dashboardQuestion: 'Question',
+    dashboardDate: 'Date',
+    dashboardBackToChat: '← Back to chat',
   },
 }
 
@@ -336,6 +377,7 @@ function App() {
   const [uploadStats, setUploadStats] = useState({ loaded: 0, total: 0, pct: 0, indeterminate: false })
   const [ingestProgress, setIngestProgress] = useState({ done: 0, total: 0 })
   const [ingestFile, setIngestFile] = useState('')
+  const [ingestTag, setIngestTag] = useState('') // categoría opcional del PDF a subir ('' = sin categoría)
   const [cancelModal, setCancelModal] = useState(false)
   const [phraseIdx, setPhraseIdx] = useState(0)
   const abortRef = useRef(null)
@@ -372,6 +414,12 @@ function App() {
     id: p.id,
     label: p.id === 'all' ? t.allProducts : p.label,
   }))
+  // Igual que productItems pero sin 'all' (aquí la opción vacía es "sin categoría",
+  // no "todos los productos") — para el dropdown de categoría al subir un PDF.
+  const tagItems = [
+    { id: '', label: t.noTag },
+    ...PRODUCTS.filter((p) => p.id !== 'all').map((p) => ({ id: p.id, label: p.label })),
+  ]
 
   // Inicializa la autenticación (lee /auth/config, procesa el callback del login).
   useEffect(() => {
@@ -499,7 +547,7 @@ function App() {
       ...prev,
       { id: uid(), role: 'user', content: query },
       {
-        id: aId, role: 'assistant', q: query, content: '', sources: [], relevant: true, streaming: true, mode: currentMode,
+        id: aId, role: 'assistant', q: query, content: '', sources: [], relevant: true, clarification: false, suggestions: [], streaming: true, mode: currentMode,
         // Igual que al recargar de BD: el deck queda ligado al theme con que se generó.
         ...(currentMode === 'presentation'
           ? { meta: { theme: presTheme, presentation_opts: { audience: presAudience, slides: presSlides } } }
@@ -550,13 +598,21 @@ function App() {
             patchMessage(aId, {
               sources: m.sources || [],
               relevant: m.relevant !== false,
+              // Caso A (ambigüedad entre productos, ver docs/GOVERNANCE.md): campo
+              // opcional/aditivo — ausente en respuestas viejas, se trata como false.
+              clarification: m.clarification === true,
               // mode confirmado por el backend (por si cambia entre el envío y la respuesta)
               ...(m.mode ? { mode: m.mode } : {}),
             })
           } else if (m.type === 'token') {
             acc += m.text
             patchMessage(aId, { content: acc })
+          } else if (m.type === 'suggestions') {
+            // Preguntas de seguimiento (Caso C, mode standard — ver docs/GOVERNANCE.md).
+            // Llega DESPUÉS del último token, nunca a medias con el texto que "escribe".
+            patchMessage(aId, { suggestions: Array.isArray(m.items) ? m.items.slice(0, 3) : [] })
           }
+          // Cualquier otro `type` desconocido se ignora (compatibilidad hacia adelante).
         }
       }
       patchMessage(aId, { streaming: false })
@@ -674,6 +730,7 @@ function App() {
     }
     const form = new FormData()
     form.append('file', file)
+    if (ingestTag) form.append('tag', ingestTag)
     xhr.send(form)
   }
 
@@ -761,6 +818,15 @@ function App() {
             hideCloseButton
           />
         )}
+        {!m.streaming && m.clarification && m.content && (
+          <InlineNotification
+            kind="info"
+            title={t.clarificationTitle}
+            subtitle={t.clarificationSub}
+            lowContrast
+            hideCloseButton
+          />
+        )}
         <Tile className="answer-tile">
           <div className="answer-header">
             <WatsonHealthTextAnnotationToggle size={20} />
@@ -790,6 +856,23 @@ function App() {
                   </IconButton>
                 </>
               )}
+            </div>
+          )}
+          {!m.streaming && (m.mode || 'standard') === 'standard' && m.suggestions?.length > 0 && (
+            <div className="suggestions-row">
+              <span className="suggestions-label">{t.suggestionsLabel}</span>
+              {m.suggestions.map((s, i) => (
+                <Button
+                  key={i}
+                  kind="ghost"
+                  size="sm"
+                  className="suggestion-chip"
+                  disabled={loading}
+                  onClick={() => ask(s)}
+                >
+                  {s}
+                </Button>
+              ))}
             </div>
           )}
         </Tile>
@@ -860,6 +943,26 @@ function App() {
 
   // Landing: si el login está activo y aún no entraste (ni como invitado).
   const showLanding = authEnabled && !authUser && !guest
+
+  // Panel de feedback (uso interno de César, NO parte de la demo): SOLO accesible
+  // por URL directa (#dashboard) — a propósito SIN botón/enlace en el header (ver
+  // decisión "menos es más" del árbol de gobernanza, docs/STATUS.md). Este chequeo
+  // va DESPUÉS de todos los hooks (arriba) para no violar las reglas de hooks con
+  // un return condicional.
+  if (typeof window !== 'undefined' && window.location.hash === '#dashboard') {
+    return (
+      <Theme theme="g100">
+        <Dashboard
+          apiBase={API_BASE}
+          authEnabled={authEnabled}
+          authUser={authUser}
+          authHeader={authHeader}
+          login={login}
+          t={t}
+        />
+      </Theme>
+    )
+  }
 
   return (
     <Theme theme="g100">
@@ -1122,6 +1225,17 @@ function App() {
             <Tile className="ingest-tile">
               <h3>{t.ingestTitle}</h3>
               <p className="ingest-help">{t.ingestHelp}</p>
+              <Dropdown
+                id="ingest-tag-select"
+                size="sm"
+                type="default"
+                label={t.tagLabel}
+                titleText={t.tagLabel}
+                items={tagItems}
+                itemToString={(i) => (i ? i.label : '')}
+                selectedItem={tagItems.find((i) => i.id === ingestTag)}
+                onChange={({ selectedItem }) => setIngestTag(selectedItem.id)}
+              />
               <FileUploaderDropContainer
                 accept={['application/pdf']}
                 labelText={t.uploadLabel}

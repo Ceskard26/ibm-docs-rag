@@ -102,6 +102,34 @@ cd frontend && npm run dev   # http://localhost:5173
   Storage…" / "Extrayendo texto…") con barra indeterminada; ignora tipos NDJSON
   desconocidos (compatibilidad hacia adelante). Contrato completo en
   `docs/GOVERNANCE.md` sección 6.
+- **Etiquetado por producto al subir un PDF (`documents.tag`)**: `/ingest`/`/ingest_stream`
+  aceptan un campo `tag` opcional (form-data) con uno de los 7 IDs de producto del
+  frontend; whitelist estricta (`VALID_TAGS`/`_sanitize_tag`) — cualquier otro valor
+  se guarda `NULL` sin fallar la ingesta. `product_filter_sql` ahora matchea por
+  `source LIKE ...` **o** `tag = <producto>`, así un PDF subido con categoría aparece
+  al filtrar por ese producto igual que los docs de GitHub. Frontend: nuevo `Dropdown`
+  "Categoría (opcional)" junto al uploader de PDF (reusa el array `PRODUCTS`, opción
+  por defecto "Sin categoría"). Motivado por la contaminación de retrieval detectada
+  el 2026-09-15 (~2225 chunks de PDFs de prueba sin relación con los 7 productos);
+  el tagueo evita que vuelva a pasar sin tener que borrar/reindexar todo.
+- **Preguntas de seguimiento sugeridas (2026-09-15)**: tras una respuesta normal
+  (Caso C de `mode == "standard"` — ni chitchat, ni ambigüedad Caso A, ni fuera de
+  alcance Caso B, ni otros `mode`), aparecen 2-3 chips clicables debajo de la
+  respuesta con preguntas de seguimiento relacionadas; clic = se auto-envían con la
+  `ask()` existente. Sin costo de LLM extra: el modelo las genera en la MISMA
+  llamada de generación, delimitadas por un marcador (`---SUGERENCIAS---`) que el
+  backend separa del texto visible ANTES de que llegue al cliente (streaming con
+  "hold-back" del marcador — nunca aparecen a medias ni se mezclan con la
+  respuesta). Contrato completo en `docs/GOVERNANCE.md`. Frontend: chips Carbon
+  (`Button kind="ghost" size="sm"`) en `App.jsx`, sin dependencias nuevas.
+- **Panel de feedback — uso interno de César (2026-09-15)**: nuevo endpoint
+  `GET /feedback/stats` (requiere login, 401 si anónimo) agrega la tabla
+  `feedback`: totales 👍/👎, desglose por idioma, últimos 50 👎 con
+  pregunta/respuesta/fecha para revisar qué falló. Solo lectura. Frontend: vista
+  `frontend/src/Dashboard.jsx`, accesible SOLO por URL directa (`#dashboard`) —
+  a propósito SIN botón en el header, respetando la decisión "menos es más" ya
+  tomada al retirar el switcher del árbol de gobernanza (ver más abajo). Requiere
+  sesión iniciada; sin sesión muestra un botón de login simple.
 
 ## Config de COS (vars de entorno — todas secretas, van al secret de Code Engine)
 
@@ -170,7 +198,8 @@ funciona igual que antes (sin COS). `GET /files/<nombre>` devuelve 503 en ese ca
    de App ID (OAUTH_SERVER_URL, CLIENT_ID, CLIENT_SECRET, AUTH_REQUIRED) + watsonx/postgres;
    `API_URL` del frontend; y agregar la URL del frontend a los redirect URLs de App ID.
    Añadir también las 4 vars de COS al secret (ver sección "Config de COS" más abajo).
-2. Dashboard de feedback/uso y Fase 2 Asset Hub (ver `docs/asset-hub-taxonomy.md`).
+2. **Dashboard de feedback (hecho ✅, ver bullet arriba)** — pendiente aún: dashboard
+   de USO (no solo feedback) y Fase 2 Asset Hub (ver `docs/asset-hub-taxonomy.md`).
    Reranking: parcialmente cubierto por el retrieval híbrido RRF (ver bullet arriba);
    un reranker dedicado (watsonx, cross-encoder) sobre el top-N fusionado sigue pendiente.
 
@@ -186,6 +215,19 @@ funciona igual que antes (sin COS). `GET /files/<nombre>` devuelve 503 en ese ca
   400 chars + parte "palabras gigantes"; `embed_safe` divide si aún se pasa.
 - **En Code Engine NO setear `POSTGRES_CERT`** (el Dockerfile ya la fija a /app/postgres_cert.pem).
 - `_embeddings` se inicializa perezoso (un parpadeo de red no debe impedir arrancar el backend).
+- **Latencia (medido 2026-09-16): instanciar `ModelInference`/abrir una conexión Postgres
+  cuestan ~1-2s CADA VEZ, sin importar que sea el mismo proceso** — no es la llamada de
+  red en sí (~0.4-0.5s), es la construcción del objeto/el handshake. `_chat_model()` ahora
+  es un singleton perezoso (igual patrón que `_embeddings`) y Postgres usa un
+  `ThreadedConnectionPool` (`_get_pool()`/`_release_db()`) en vez de abrir/cerrar una
+  conexión por query. Antes de este fix una sola pregunta pagaba el costo de construir el
+  modelo 2 veces (reescritura + generación) y abrir 3+ conexiones (retrieval, conversación,
+  guardar mensaje) — total ~11-12s por pregunta. Después: ~4.5-5s en estado estable (la
+  primera pregunta tras un arranque/redeploy sigue "calentando" los singletons, ~8s).
+  **Ojo con el pool al reusar conexiones**: `_release_db` hace `conn.rollback()` antes de
+  devolver la conexión — sin esto, una query que falla a mitad de una transacción deja la
+  conexión en estado "abortada" y envenena al PRÓXIMO request que la tome del pool (antes
+  no importaba porque la conexión se cerraba y se descartaba).
 
 ## Equipo / gobernanza
 - `.claude/agents/`: frontend-lead, backend-lead, rag-lead, features-lead, devops-lead, qa-reviewer.

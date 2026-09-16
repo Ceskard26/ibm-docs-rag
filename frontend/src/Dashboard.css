@@ -1,0 +1,105 @@
+/* ============================================================
+   Dashboard — panel de feedback, uso interno (Carbon g100)
+   Sin librerías externas; solo tablas/tiles simples.
+   ============================================================ */
+
+.dashboard-page {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 4rem;
+}
+
+.dashboard-header {
+  margin-bottom: 1.5rem;
+}
+
+.dashboard-header h1 {
+  font-size: 1.75rem;
+  font-weight: 400;
+  margin-bottom: 0.25rem;
+}
+
+.dashboard-subtitle {
+  color: #8d8d8d;
+  font-size: 0.9rem;
+}
+
+.dashboard-tile {
+  margin-bottom: 1.5rem;
+}
+
+.dashboard-tile h3 {
+  font-weight: 400;
+  margin-bottom: 1rem;
+}
+
+.dashboard-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.dashboard-card {
+  text-align: center;
+}
+
+.dashboard-card-label {
+  color: #8d8d8d;
+  font-size: 0.8125rem;
+  margin-bottom: 0.5rem;
+}
+
+.dashboard-card-value {
+  font-size: 2rem;
+  font-weight: 600;
+}
+
+.dashboard-card-value--up {
+  color: #42be65;
+}
+
+.dashboard-card-value--down {
+  color: #fa4d56;
+}
+
+.dashboard-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.dashboard-table th,
+.dashboard-table td {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid #393939;
+  vertical-align: top;
+}
+
+.dashboard-table th {
+  color: #8d8d8d;
+  font-weight: 400;
+}
+
+.dashboard-table--wide td {
+  max-width: 22rem;
+  overflow-wrap: break-word;
+}
+
+.dashboard-date-cell {
+  white-space: nowrap;
+  color: #8d8d8d;
+}
+
+.dashboard-empty {
+  color: #8d8d8d;
+  font-size: 0.875rem;
+}
+
+.dashboard-back {
+  display: inline-block;
+  margin-top: 1rem;
+  color: #78a9ff;
+  font-size: 0.875rem;
+}

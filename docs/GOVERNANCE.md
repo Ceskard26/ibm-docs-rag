@@ -74,6 +74,68 @@ datos, un patrón) se registra como un ADR corto en `docs/adr/NNNN-titulo.md`:
   primero. `GET /conversations/{id}` → `{id, title, messages: [{role, content,
   sources}]}` (404 si no es del usuario). `DELETE /conversations/{id}` → borra
   (404 si no es del usuario).
+- **API (uso interno, requiere login Y ser admin — 401 si `sub == "anonymous"`,
+  403 si logueado pero no está en `_FEEDBACK_ADMIN_EMAILS`):** `GET /feedback/stats`
+  → agrega la tabla `feedback` (solo lectura): `{total_up, total_down,
+  by_language: [{language, up, down}], recent_negative: [{question, answer,
+  created_at}]}` — `recent_negative` son los últimos `FEEDBACK_STATS_RECENT_LIMIT`
+  (50) feedbacks 👎, más recientes primero. `_FEEDBACK_ADMIN_EMAILS` (env var
+  `FEEDBACK_ADMIN_EMAILS`, coma-separado; default `cesar.carrasco@ibm.com`) —
+  agregado 2026-09-15 tras QA: el endpoint exponía preguntas/respuestas de
+  TODOS los usuarios a cualquiera con sesión válida, no solo a César. NO tiene
+  botón/enlace en el header (decisión "menos es más" del PO, ver
+  `docs/STATUS.md`) — el frontend lo expone solo por acceso directo a
+  `#dashboard` (`frontend/src/Dashboard.jsx`).
+- **Sugerencias de seguimiento (`/query`, `/query_stream`) — SOLO Caso C de
+  `mode == "standard"`** (ni chitchat, ni Caso A "ambiguous", ni Caso B
+  "out_of_scope" — ver `_detect_ambiguity_or_scope` más abajo—, ni otros `mode`,
+  y solo si hubo contexto relevante): el modelo genera 2-3 preguntas de
+  seguimiento en la MISMA llamada de generación de la respuesta (sin costo de
+  una llamada extra al LLM), delimitadas al final por el marcador literal
+  `SUGGESTIONS_MARKER = "---SUGERENCIAS---"` seguido de hasta 3 líneas numeradas
+  (ver `SUGGESTIONS_INSTRUCTION`, `_parse_suggestions`). El backend NUNCA deja
+  que el marcador ni el texto posterior lleguen al cliente como parte del texto
+  visible: en `/query_stream` se hace streaming con "hold-back" (retiene en
+  buffer los últimos `len(marcador)-1` caracteres sin flushear hasta confirmar
+  que NO son el inicio del marcador — algoritmo estándar de delimitador en
+  streaming, robusto aunque el marcador llegue partido entre dos deltas del
+  LLM); cuando `want_suggestions` es `False` (Caso A/B, chitchat, otros `mode`)
+  el hold es 0 y el comportamiento es idéntico al de antes de esta feature (sin
+  latencia añadida). Contrato de salida: `/query` devuelve el campo aditivo
+  `suggestions: string[]` (vacío si no aplica o si el parseo falló — nunca
+  rompe la respuesta principal); `/query_stream` emite una línea NDJSON
+  `{"type":"suggestions","items": string[]}` DESPUÉS del último `token` y ANTES
+  de `done`, solo si se parseó al menos una sugerencia. El marcador y las
+  sugerencias NUNCA se persisten en `messages.content` (se separan del texto
+  limpio antes de `save_messages`) — no reaparecen al recargar una conversación
+  guardada, son efímeras del turno en vivo. Frontend: chips `Button kind="ghost"
+  size="sm"` debajo de la respuesta (máx. 3), clic = `ask(pregunta)`.
+- **Ambigüedad / fuera-de-alcance (`_detect_ambiguity_or_scope`) — SOLO
+  `mode == "standard"`, después de `hybrid_retrieve` y antes de generar:**
+  **Caso A "ambiguous"** (activo): el top-3 fusionado se reparte entre 2+
+  productos distintos con similitudes muy parecidas (`abs(gap) < AMBIGUITY_SIMILARITY_GAP`
+  = 0.03, `best_sim >= AMBIGUITY_MIN_SIMILARITY` = 0.78) y la pregunta NO nombra
+  ya explícitamente a ninguno de los dos candidatos (si lo hace, no hay
+  ambigüedad real — se usa `abs()` en el gap y ese guard de nombre porque una
+  primera versión, sin ellos, podía disparar con gap negativo o preguntar por
+  un producto que el usuario ya había nombrado; ver `docs/STATUS.md`). El
+  system prompt de generación cambia a `SCOPE_INSTRUCTIONS["ambiguous"]`
+  (pregunta de aclaración breve mencionando los 2 productos, sin inventar
+  contenido de ninguno). Campo aditivo `clarification: bool` en la respuesta
+  de `/query` y en la línea `meta` de `/query_stream` (`true` solo en Caso A).
+  **Caso B "out_of_scope" — DESACTIVADO (2026-09-15):** el código y las
+  constantes (`OUT_OF_SCOPE_SIMILARITY_LOW/HIGH`) se conservan, pero la
+  función ya no lo dispara. QA pre-deploy encontró ~27% de falsos positivos en
+  preguntas cortas y perfectamente en alcance ("como despliego una app",
+  "cuanto cuesta el servicio") — la banda [0.72, 0.78] no distingue un match
+  débil real de un buen match típico en español, y la UI quedaba
+  autocontradictoria (decía "no cubro esto" mostrando debajo las fuentes
+  correctas). El flujo "sin información" pre-existente (contexto vacío en
+  `_build_messages`) sigue cubriendo el caso real fuera de alcance (ej.
+  MongoDB, que no es ninguno de los 7 productos) de forma honesta, sin la
+  heurística de similitud que causaba los falsos positivos. Retomar el Caso B
+  requiere una heurística mejor calibrada, no solo ajustar la banda (ver
+  comentario en `main.py` junto a `_detect_ambiguity_or_scope`).
 - **API (archivos — COS opcional):** `GET /files/{filename}` → sirve el PDF
   almacenado en COS con `Content-Disposition: inline`. 503 si COS no está
   configurado; 400 si el filename contiene `/`, `\` o `..`; 404 si el objeto no
@@ -82,25 +144,62 @@ datos, un patrón) se registra como un ADR corto en `docs/adr/NNNN-titulo.md`:
   `COS_BUCKET` están presentes; en su ausencia el comportamiento es idéntico al
   anterior (sin COS).
 - **Datos:** tabla `documents(id, content, embedding vector(768), source, created_at,
-  content_hash)` y `feedback(...)`. Fuente (`source`) = URL de GitHub, de IBM Docs, o
+  content_hash, tag)` y `feedback(...)`. Fuente (`source`) = URL de GitHub, de IBM Docs, o
   nombre de archivo PDF subido manualmente. `content_hash` (TEXT, nullable) = sha256
   del texto completo extraído de un PDF subido vía `/ingest`/`/ingest_stream` (NULL
   para chunks de GitHub/scraper, que no pasan por ese flujo); usado para dedupe de
-  re-subidas con nombre distinto (ver "Dedupe de ingesta" más abajo). Índice GIN
+  re-subidas con nombre distinto (ver "Dedupe de ingesta" más abajo). `tag` (TEXT,
+  nullable) = categoría/producto opcional elegida al subir un PDF vía `/ingest` o
+  `/ingest_stream` (ver contrato de esos endpoints más abajo); NULL para chunks de
+  GitHub/scraper y para PDFs subidos sin elegir categoría. Índice GIN
   `idx_documents_content_fts` sobre `to_tsvector('simple', content)` para el canal
   léxico del retrieval híbrido.
-- **Retrieval híbrido (semántico + léxico, RRF) — contrato de `/query`/`/query_stream`:**
-  el retrieval en producción es `hybrid_retrieve()` (no `retrieve()`, que se conserva
-  como fallback/comparación). Fusiona (a) top-15 por similitud coseno y (b) top-15 por
-  ranking léxico full-text — `to_tsquery('simple', ...)` con los lexemes de la query
-  unidos por OR (no AND: `websearch_to_tsquery` exige que TODOS los términos aparezcan
-  en el mismo chunk, lo que casi nunca pasa con una query de 4-5 palabras), excluyendo
-  stopwords ES/EN (`_STOPWORDS_ES_EN`) — vía Reciprocal Rank Fusion (RRF, k=60,
-  constante estándar de la literatura). Deduplica por contenido idéntico ANTES de
-  devolver el top-5 (mismo texto de fuentes/nombres de archivo distintos cuenta como
-  una sola entrada — cubre el caso de un PDF indexado dos veces con nombres diferentes).
-  Config `simple` en todo el canal léxico a propósito: el corpus es bilingüe es/en y
-  `simple` no aplica stemming de un solo idioma.
+- **`/ingest` y `/ingest_stream` — campo `tag` (opcional, form-data):** además de
+  `file`, ambos aceptan un campo `tag` opcional con un ID de producto (los mismos 7
+  del array `PRODUCTS` del frontend: `watsonx`, `vpc`, `messages-for-rabbitmq`,
+  `containers`, `codeengine`, `cloud-object-storage`, `databases-for-postgresql`).
+  Whitelist estricta en `_sanitize_tag`/`VALID_TAGS`: cualquier valor fuera de esa
+  lista (incluido vacío/ausente) se guarda como `NULL` — la ingesta NUNCA falla por
+  un tag inválido. El tag se guarda en cada chunk insertado de ese PDF y se usa en
+  `product_filter_sql` (ver retrieval híbrido) para que el PDF aparezca al filtrar
+  por ese producto, igual que los docs de GitHub.
+- **Retrieval híbrido (semántico + léxico, fusión max+bonus) — contrato de
+  `/query`/`/query_stream`:** el retrieval en producción es `hybrid_retrieve()`
+  (no `retrieve()`, que se conserva como fallback/comparación). Fusiona (a) top-15
+  por similitud coseno y (b) top-15 por ranking léxico full-text —
+  `to_tsquery('simple', ...)` con los lexemes de la query unidos por OR (no AND:
+  `websearch_to_tsquery` exige que TODOS los términos aparezcan en el mismo chunk,
+  lo que casi nunca pasa con una query de 4-5 palabras), excluyendo stopwords
+  ES/EN (`_STOPWORDS_ES_EN`). Deduplica por contenido idéntico ANTES de devolver
+  el top-5 (mismo texto de fuentes/nombres de archivo distintos cuenta como una
+  sola entrada — cubre el caso de un PDF indexado dos veces con nombres
+  diferentes). Config `simple` en todo el canal léxico a propósito: el corpus es
+  bilingüe es/en y `simple` no aplica stemming de un solo idioma.
+  **Fórmula de fusión (cambio 2026-09 — reemplaza la suma RRF pura):**
+  `score = max(sem, lex) + RRF_BONUS * min(sem, lex)`, donde `sem = 1/(RRF_K +
+  rank_semántico)` si el chunk apareció en ese canal (si no, 0; mismo criterio
+  para `lex`). `RRF_K = 8`, `RRF_BONUS = 0.2` (ajustados empíricamente — ver
+  ADR/commit; no son los valores "estándar de literatura" k=60, elegidos a
+  propósito para esta rama angosta de 15 candidatos). Motivo: la suma RRF
+  aditiva clásica (`score = sem + lex`) favorecía sistemáticamente a un chunk
+  "decente en ambos canales" por encima de uno "excelente en un solo canal" —
+  con `HYBRID_BRANCH_LIMIT=15` candidatos por rama y k=60, la diferencia de
+  score entre rank 1 y rank 15 es muy chica (~23%), así que dos apariciones
+  mediocres casi siempre superan a una aparición excelente. Esto rompía un caso
+  real: una pregunta de Kubernetes parafraseada ("¿cómo escalo un cluster de
+  Kubernetes en IBM Cloud?") cuyo chunk correcto rankeaba #3 puro-coseno pero no
+  contenía ningún lexema literal de la query (sin stemming) — perdía contra
+  chunks con match léxico+semántico mediocres en ambos canales. A la vez, el
+  canal léxico existe PRECISAMENTE para el caso opuesto — una pregunta
+  parafraseada que embebe lejos de un chunk literal (`"comando para conectarme a
+  una máquina virtual"` vs. un chunk con `ssh -i key.pem...`) — y ESE caso
+  necesita que un match léxico fuerte, sin apoyo semántico, también rankee alto.
+  `max(sem, lex)` resuelve ambos casos (premia la excelencia en CUALQUIERA de
+  los dos canales); el término `RRF_BONUS * min(sem, lex)` sigue premiando el
+  doble-match (la señal más fuerte, cuando ambos canales concuerdan) sin dejar
+  que por sí solo le gane a la excelencia en un solo canal. Verificado sin
+  regresión contra el caso léxico-puro (SSH) y el barrido de 7 productos — ver
+  `docs/STATUS.md`.
   **Criterio de "relevante" (`_is_relevant_row`)** — reemplaza al criterio anterior
   (solo `similarity >= MIN_SIMILARITY`): un chunk es relevante si CUALQUIERA se cumple:
   (1) similitud coseno >= `MIN_SIMILARITY` (0.72, como antes), O (2) el chunk cae en
