@@ -2023,18 +2023,22 @@ _ICON_MAP = {
 }
 
 
-def _svg_to_png_cached(svg_rel_path: str) -> str | None:
-    """Convierte SVG a PNG (caché en icon-cache/). Devuelve ruta al PNG o None si falla."""
+def _svg_to_png_cached(svg_rel_path: str, size_px: int = 240) -> str | None:
+    """Convierte SVG a PNG (caché en icon-cache/). Devuelve ruta al PNG o None si falla.
+
+    size_px=240 (antes 96): el icono pasó de badge diminuto (0.55") a chip
+    protagonista (~1.15") — a ese tamaño 96px se veía borroso/pixelado.
+    """
     svg_path = os.path.join(_ASSETS_DIR, svg_rel_path)
     if not os.path.exists(svg_path):
         return None
-    # Nombre de caché = hash del path relativo
-    cache_name = re.sub(r"[^\w]", "_", svg_rel_path) + ".png"
+    # Nombre de caché = hash del path relativo + tamaño (invalida el caché viejo de 96px)
+    cache_name = re.sub(r"[^\w]", "_", svg_rel_path) + f"_{size_px}.png"
     cache_path = os.path.join(_ICON_CACHE, cache_name)
     if not os.path.exists(cache_path):
         try:
             import cairosvg
-            cairosvg.svg2png(url=svg_path, write_to=cache_path, output_width=96, output_height=96)
+            cairosvg.svg2png(url=svg_path, write_to=cache_path, output_width=size_px, output_height=size_px)
         except Exception as exc:
             print(f"[pptx] icon convert failed {svg_rel_path}: {exc}")
             return None
@@ -2091,6 +2095,100 @@ def _add_textbox_run(slide, left, top, width, height, text: str, size_pt,
     run.font.color.rgb = _rgb(color_hex)
     run.font.name = font
     return tb
+
+
+# ── Helpers de diseño "nivel 2" ──────────────────────────────────────────────
+# Gradientes, sombras y transparencia: python-pptx no expone esto en su API
+# pública de alto nivel, así que se manipula el XML subyacente directamente
+# (mismo patrón que usa el propio PowerPoint internamente). Añadido 2026-09-16
+# tras feedback directo de que el nivel visual de los decks no había subido
+# con los fixes anteriores (bugs de parsing/layout) — esto es el salto real:
+# fondos con profundidad, sombras suaves en tarjetas, iconos con presencia
+# real y gráficos nativos en vez de solo número grande en texto.
+def _add_shadow(shape, blur_pt=14, dist_pt=5, direction_deg=45, alpha_pct=32,
+                color_hex="000000"):
+    """Sombra exterior suave sobre una shape (rounded rect, oval, etc.)."""
+    from pptx.oxml.ns import qn
+    from pptx.util import Pt
+    spPr = shape._element.spPr
+    effect_lst = spPr.makeelement(qn("a:effectLst"), {})
+    outer_shdw = spPr.makeelement(qn("a:outerShdw"), {
+        "blurRad": str(Pt(blur_pt)),
+        "dist": str(Pt(dist_pt)),
+        "dir": str(int(direction_deg * 60000)),
+        "rotWithShape": "0",
+    })
+    clr = spPr.makeelement(qn("a:srgbClr"), {"val": color_hex})
+    alpha = spPr.makeelement(qn("a:alpha"), {"val": str(int(alpha_pct * 1000))})
+    clr.append(alpha)
+    outer_shdw.append(clr)
+    effect_lst.append(outer_shdw)
+    spPr.append(effect_lst)
+
+
+def _set_color_alpha(color_format, alpha_pct):
+    """Aplica transparencia a un ColorFormat ya seteado con .rgb = ... — sirve
+    tanto para fill.fore_color (shapes) como para run.font.color (texto).
+    """
+    from pptx.oxml.ns import qn
+    xfill = color_format._xFill
+    clr = xfill.find(qn("a:srgbClr"))
+    for el in clr.findall(qn("a:alpha")):
+        clr.remove(el)
+    alpha = clr.makeelement(qn("a:alpha"), {"val": str(int(alpha_pct * 1000))})
+    clr.append(alpha)
+
+
+def _set_fill_alpha(fill, alpha_pct):
+    """Aplica transparencia a un solid fill ya seteado (fill.solid() + fore_color.rgb)."""
+    _set_color_alpha(fill.fore_color, alpha_pct)
+
+
+def _add_gradient_bg(slide, hex_from: str, hex_to: str, angle_deg: float = 45):
+    """Fondo con gradiente diagonal de dos paradas (portada/divisores)."""
+    fill = slide.background.fill
+    fill.gradient()
+    stops = fill.gradient_stops
+    stops[0].position = 0.0
+    stops[0].color.rgb = _rgb(hex_from)
+    stops[1].position = 1.0
+    stops[1].color.rgb = _rgb(hex_to)
+    fill.gradient_angle = angle_deg
+
+
+def _add_soft_circle(slide, center_x, center_y, diameter, hex6: str, alpha_pct: float = 10):
+    """Círculo translúcido decorativo (profundidad de fondo, sin distraer del texto)."""
+    from pptx.enum.shapes import MSO_SHAPE
+    shape = slide.shapes.add_shape(
+        MSO_SHAPE.OVAL, center_x - diameter // 2, center_y - diameter // 2, diameter, diameter,
+    )
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = _rgb(hex6)
+    _set_fill_alpha(shape.fill, alpha_pct)
+    shape.line.fill.background()
+    shape.shadow.inherit = False
+    return shape
+
+
+def _add_rounded_rect(slide, left, top, width, height, hex6: str, radius: float = 0.09,
+                      shadow: bool = True, shadow_alpha: float = 32):
+    """Tarjeta con esquinas redondeadas y sombra suave — reemplaza el rect plano
+    de las cards/stats/chips para dar sensación de profundidad y producto
+    terminado en vez de formas planas sin jerarquía.
+    """
+    from pptx.enum.shapes import MSO_SHAPE
+    shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top, width, height)
+    try:
+        shape.adjustments[0] = radius
+    except Exception:
+        pass
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = _rgb(hex6)
+    shape.line.fill.background()
+    shape.shadow.inherit = False
+    if shadow:
+        _add_shadow(shape, alpha_pct=shadow_alpha)
+    return shape
 
 
 def _theme_colors(theme: str) -> dict:
@@ -2152,7 +2250,14 @@ def _add_slide_chrome(sl, slide_num: int, SLIDE_W, SLIDE_H, tc: dict,
 
 
 def _render_icon(sl, title: str, theme: str, SLIDE_W) -> bool:
-    """Renderiza el icono de arquitectura arriba-derecha. Devuelve True si lo puso."""
+    """Chip de icono arriba-derecha: tarjeta redondeada con sombra + icono grande.
+
+    Antes era un badge de 0.55" pegado en la esquina (casi invisible) — ahora
+    es un elemento visual real (~1.15", con profundidad) que además aprovecha
+    que los iconos oficiales de arquitectura IBM ya traen su propio color de
+    categoría (AI=púrpura, Data=azul, etc.), dando variedad de color al deck
+    sin salirse de la paleta de marca. Devuelve True si lo puso.
+    """
     from pptx.util import Inches
     svg_rel = _match_icon(title)
     if not svg_rel:
@@ -2160,14 +2265,15 @@ def _render_icon(sl, title: str, theme: str, SLIDE_W) -> bool:
     png_path = _svg_to_png_cached(svg_rel)
     if not png_path:
         return False
-    icon_sz = Inches(0.55)
-    icon_r  = SLIDE_W - Inches(0.75)
-    icon_t  = Inches(0.22)
-    if theme == "dark":
-        pad = Inches(0.06)
-        _add_rect(sl, icon_r - pad, icon_t - pad,
-                  icon_sz + 2 * pad, icon_sz + 2 * pad, _IBM_WHITE)
-    sl.shapes.add_picture(png_path, icon_r, icon_t, icon_sz, icon_sz)
+    chip_sz = Inches(1.15)
+    chip_r  = SLIDE_W - Inches(0.6) - chip_sz
+    chip_t  = Inches(0.16)
+    chip_bg = "262626" if theme == "dark" else _IBM_WHITE
+    chip = _add_rounded_rect(sl, chip_r, chip_t, chip_sz, chip_sz, chip_bg,
+                             radius=0.18, shadow=True, shadow_alpha=38)
+    pad = Inches(0.18)
+    sl.shapes.add_picture(png_path, chip_r + pad, chip_t + pad,
+                          chip_sz - 2 * pad, chip_sz - 2 * pad)
     return True
 
 
@@ -2176,7 +2282,7 @@ def _render_title_bar(sl, title: str, has_icon: bool, tc: dict, SLIDE_W):
     from pptx.util import Inches, Pt, Emu
     MARGIN_L  = Inches(0.6)
     CONTENT_W = SLIDE_W - MARGIN_L - Inches(0.6)
-    title_w   = CONTENT_W - (Inches(0.75) if has_icon else Inches(0))
+    title_w   = CONTENT_W - (Inches(1.35) if has_icon else Inches(0))
     tb = sl.shapes.add_textbox(MARGIN_L, Inches(0.18), title_w, Inches(0.82))
     tf = tb.text_frame
     tf.word_wrap = True
@@ -2187,8 +2293,10 @@ def _render_title_bar(sl, title: str, has_icon: bool, tc: dict, SLIDE_W):
     r.font.bold = False
     r.font.color.rgb = _rgb(tc["title"])
     r.font.name = "IBM Plex Sans Light"
-    # Línea separadora IBM Blue debajo del título
-    _add_rect(sl, MARGIN_L, Inches(1.08), CONTENT_W, Emu(65000), _IBM_BLUE)
+    # Línea separadora IBM Blue debajo del título — se acorta al ancho del
+    # título (no CONTENT_W completo) cuando hay icon chip, para no cruzar por
+    # debajo del chip (bug real detectado inspeccionando el render 2026-09-16).
+    _add_rect(sl, MARGIN_L, Inches(1.08), title_w, Emu(65000), _IBM_BLUE)
     return MARGIN_L, CONTENT_W
 
 
@@ -2312,28 +2420,84 @@ def _render_steps(sl, MARGIN_L, CONTENT_W, top, height, steps, tc, theme):
                       "2D2D2D" if theme == "dark" else "E0E0E0")
 
 
+_PERCENT_RE = re.compile(r"^(\d{1,3}(?:\.\d+)?)\s*%$")
+
+
+def _render_stat_ring(sl, center_x, top, size, percent: float, tc: dict, theme: str):
+    """Anillo de progreso nativo (gráfico doughnut real, no texto) con el
+    porcentaje superpuesto en el centro. Reemplaza el 'número grande en texto'
+    de antes — un gráfico real es el salto de calidad visual más directo para
+    datos cuantificables en una slide de stats.
+    """
+    from pptx.util import Pt
+    from pptx.chart.data import CategoryChartData
+    from pptx.enum.chart import XL_CHART_TYPE
+    from pptx.oxml.ns import qn
+    from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+
+    left = center_x - size // 2
+    pct = max(0.0, min(100.0, percent))
+    track = "333333" if theme == "dark" else "E0E0E0"
+    accent = tc["accent"]
+
+    chart_data = CategoryChartData()
+    chart_data.categories = ["value", "rest"]
+    chart_data.add_series("s1", (pct, 100 - pct))
+    gframe = sl.shapes.add_chart(XL_CHART_TYPE.DOUGHNUT, left, top, size, size, chart_data)
+    chart = gframe.chart
+    chart.has_title = False
+    chart.has_legend = False
+    plot = chart.plots[0]
+    plot.has_data_labels = False
+    series = chart.series[0]
+    points = series.points
+    points[0].format.fill.solid()
+    points[0].format.fill.fore_color.rgb = _rgb(accent)
+    points[0].format.line.fill.background()
+    points[1].format.fill.solid()
+    points[1].format.fill.fore_color.rgb = _rgb(track)
+    points[1].format.line.fill.background()
+    # Grosor del anillo (holeSize %) — python-pptx no lo expone, XML directo.
+    plot_area = chart._chartSpace.find(qn("c:chart")).find(qn("c:plotArea"))
+    doughnut = plot_area.find(qn("c:doughnutChart"))
+    hole = doughnut.makeelement(qn("c:holeSize"), {"val": "72"})
+    doughnut.append(hole)
+
+    # Porcentaje superpuesto en el centro del anillo.
+    tb = sl.shapes.add_textbox(left, top, size, size)
+    tf = tb.text_frame
+    tf.word_wrap = False
+    tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+    p = tf.paragraphs[0]
+    p.alignment = PP_ALIGN.CENTER
+    r = p.add_run()
+    r.text = f"{pct:g}%"
+    r.font.size = Pt(size.inches * 15)
+    r.font.bold = True
+    r.font.color.rgb = _rgb(tc["title"])
+    r.font.name = "IBM Plex Sans"
+
+
 def _render_cards(sl, MARGIN_L, CONTENT_W, top, height, cards, tc, theme):
     """Renderiza un grid de tarjetas 2x2 (o fila de 3) estilo Carbon:
     fondo sutil, borde superior de acento azul, keyword bold + descripción gris.
     """
     from pptx.util import Inches, Pt, Emu
+    from pptx.enum.text import MSO_ANCHOR
 
     n = len(cards)
     cols = 3 if n == 3 else 2
     rows = 1 if n == 3 else 2
     gap = Inches(0.3)
     card_w = (CONTENT_W - gap * (cols - 1)) / cols
-    # Techo de altura por tarjeta: más alto que antes (1.7"/2.15" dejaba las
-    # tarjetas chicas y flotando en medio de mucho aire — bug de diseño real
-    # 2026-09-16, detectado inspeccionando un deck generado). Un poco de aire
-    # DENTRO de la tarjeta es normal en un diseño de cards; lo que se ve mal es
-    # la tarjeta entera flotando pequeña en medio de la slide.
-    max_card_h = Inches(2.4) if rows == 1 else Inches(2.6)
+    # Techo de altura por tarjeta. Bug de diseño real 2026-09-16 (dos rondas):
+    # primero un techo bajo (1.7"/2.15") dejaba las tarjetas chicas flotando
+    # en medio de mucho aire; el segundo fix (2.4"/2.6") ayudó para 2x2 pero
+    # una sola fila de 3 tarjetas seguía dejando ~3" de vacío debajo — así que
+    # una sola fila ahora usa la mayoría de la altura disponible y centra el
+    # contenido dentro de la tarjeta (más alta = el texto arriba se ve perdido).
+    max_card_h = Emu(int(height * 0.8)) if rows == 1 else Inches(2.6)
     card_h = min((height - gap * (rows - 1)) / rows, max_card_h)
-    # Ancla arriba (como 'defs'/'steps'), NO centra verticalmente: el aire
-    # sobrante queda abajo, consistente con el resto de layouts del deck —
-    # antes se repartía mitad arriba/mitad abajo, lo que se leía como que la
-    # slide "no sabía dónde poner el contenido".
     card_bg = "262626" if theme == "dark" else "F4F4F4"
 
     for i, card in enumerate(cards):
@@ -2341,16 +2505,23 @@ def _render_cards(sl, MARGIN_L, CONTENT_W, top, height, cards, tc, theme):
         row = i // cols
         cx = MARGIN_L + col * (card_w + gap)
         cy = top + row * (card_h + gap)
-        _add_rect(sl, cx, cy, card_w, card_h, card_bg)
-        # Borde superior de acento
-        _add_rect(sl, cx, cy, card_w, Emu(38000), _IBM_BLUE)
+        _add_rounded_rect(sl, cx, cy, card_w, card_h, card_bg, radius=0.09)
 
-        pad = Inches(0.22)
-        tb = sl.shapes.add_textbox(cx + pad, cy + Inches(0.18), card_w - 2 * pad, card_h - Inches(0.3))
+        pad = Inches(0.24)
+        tb = sl.shapes.add_textbox(cx + pad, cy + Inches(0.2), card_w - 2 * pad, card_h - Inches(0.35))
         tf = tb.text_frame
         tf.word_wrap = True
+        if rows == 1:
+            tf.vertical_anchor = MSO_ANCHOR.MIDDLE
         p_kw = tf.paragraphs[0]
         p_kw.line_spacing = 1.1
+        # Marcador cuadrado de acento (reemplaza la barra superior recta, que
+        # no combinaba con la esquina redondeada de la tarjeta) + keyword.
+        r_mark = p_kw.add_run()
+        r_mark.text = "■  "
+        r_mark.font.size = Pt(15)
+        r_mark.font.color.rgb = _rgb(tc["accent"])
+        r_mark.font.name = "IBM Plex Sans"
         r_kw = p_kw.add_run()
         r_kw.text = card.get("keyword") or ""
         r_kw.font.size = Pt(16)
@@ -2429,7 +2600,12 @@ def build_pptx(
 
     # ── PORTADA IBM Blue ──────────────────────────────────────────────────────
     cover = prs.slides.add_slide(blank_layout)
-    _set_bg(cover, _IBM_BLUE)
+    _add_gradient_bg(cover, _IBM_BLUE, "002D9C", angle_deg=45)
+    # Círculos translúcidos: profundidad de fondo tipo "hero section" en vez de
+    # un azul plano — el detalle que hace que un deck se sienta diseñado y no
+    # generado. Se pintan ANTES del resto para quedar detrás de todo.
+    _add_soft_circle(cover, SLIDE_W - Inches(0.5), Inches(0.3), Inches(6.5), _IBM_WHITE, 7)
+    _add_soft_circle(cover, Inches(1.4), SLIDE_H + Inches(0.6), Inches(4.2), "A56EFF", 14)
 
     # Banda azul-oscura sutil en la parte inferior (contraste con logo)
     _add_rect(cover, Inches(0), SLIDE_H - Inches(1.2), SLIDE_W, Inches(1.2), "003A6D")
@@ -2493,7 +2669,9 @@ def build_pptx(
 
         # ── Layout: DIVISOR de sección (fondo IBM Blue completo) ─────────
         if layout == "divider":
-            _set_bg(sl, _IBM_BLUE)
+            _add_gradient_bg(sl, "002D9C", _IBM_BLUE, angle_deg=135)
+            _add_soft_circle(sl, Inches(0.2), SLIDE_H - Inches(0.2), Inches(5), "A56EFF", 12)
+            _add_soft_circle(sl, SLIDE_W - Inches(1), Inches(0), Inches(3.5), _IBM_WHITE, 6)
             _add_rect(sl, Inches(0), Inches(0), SLIDE_W, Inches(0.06), "003A6D")
             _add_rect(sl, Inches(0), SLIDE_H - Inches(0.06), SLIDE_W, Inches(0.06), "003A6D")
             # Número de sección pequeño arriba-izquierda
@@ -2527,6 +2705,19 @@ def build_pptx(
 
         # ── Layout: IMPACTO (> frase) ─────────────────────────────────────
         if layout == "impact":
+            # Comilla gigante decorativa detrás del texto (muy translúcida): le
+            # da a la slide de cita un ancla visual fuerte en vez de solo texto
+            # grande sobre fondo vacío.
+            tb_q = sl.shapes.add_textbox(Inches(0.3), Inches(-1.0), Inches(4), Inches(4))
+            tf_q = tb_q.text_frame
+            p_q = tf_q.paragraphs[0]
+            r_q = p_q.add_run()
+            r_q.text = "“"
+            r_q.font.size = Pt(340)
+            r_q.font.bold = True
+            r_q.font.name = "IBM Plex Sans"
+            r_q.font.color.rgb = _rgb(tc["accent"])
+            _set_color_alpha(r_q.font.color, 16)
             # Franja lateral IBM Blue (2/3 de altura)
             _add_rect(sl, Inches(0.5), Inches(1.6), Inches(0.14), Inches(3.8), _IBM_BLUE)
             tx_imp = sl.shapes.add_textbox(Inches(0.9), Inches(1.4), Inches(11.5), Inches(4.5))
@@ -2564,34 +2755,42 @@ def build_pptx(
             card_gap = Inches(0.25)
             card_top = Inches(1.4)
             card_h   = Inches(4.9)
+            card_bg = "1E1E1E" if theme == "dark" else "F4F4F4"
             for idx, stat in enumerate(stats):
                 cx = MARGIN_L + idx * (card_w + card_gap)
-                # Caja de fondo por tarjeta
-                card_bg = "1E1E1E" if theme == "dark" else "F4F4F4"
-                _add_rect(sl, cx, card_top, card_w - card_gap, card_h, card_bg)
-                # Cifra enorme
-                fig_color = _IBM_ACCENT_DARK if theme == "dark" else _IBM_BLUE
-                tb_fig = sl.shapes.add_textbox(
-                    cx + Inches(0.2), card_top + Inches(0.35),
-                    card_w - card_gap - Inches(0.4), Inches(1.8),
-                )
-                tf_fig = tb_fig.text_frame
-                tf_fig.word_wrap = True
-                p_fig = tf_fig.paragraphs[0]
-                r_fig = p_fig.add_run()
-                r_fig.text = stat["figure"]
-                r_fig.font.size = Pt(52)
-                r_fig.font.bold = True
-                r_fig.font.color.rgb = _rgb(fig_color)
-                r_fig.font.name = "IBM Plex Sans"
-                # Descripción
-                tb_desc = sl.shapes.add_textbox(
-                    cx + Inches(0.2), card_top + Inches(2.35),
-                    card_w - card_gap - Inches(0.4), Inches(2.4),
-                )
+                cw = card_w - card_gap
+                _add_rounded_rect(sl, cx, card_top, cw, card_h, card_bg, radius=0.06)
+                center_x = cx + cw // 2
+                pct_m = _PERCENT_RE.match(stat["figure"].strip())
+                if pct_m:
+                    # Cifra porcentual real -> anillo de progreso nativo.
+                    ring_sz = min(cw - Inches(0.5), Inches(2.0))
+                    _render_stat_ring(sl, center_x, card_top + Inches(0.45), ring_sz,
+                                      float(pct_m.group(1)), tc, theme)
+                    desc_top = card_top + Inches(0.45) + ring_sz + Inches(0.25)
+                else:
+                    # Cifra no-porcentual (p.ej. "5 min", "300+") -> número grande centrado.
+                    fig_color = _IBM_ACCENT_DARK if theme == "dark" else _IBM_BLUE
+                    tb_fig = sl.shapes.add_textbox(cx + Inches(0.15), card_top + Inches(0.7),
+                                                   cw - Inches(0.3), Inches(1.4))
+                    tf_fig = tb_fig.text_frame
+                    tf_fig.word_wrap = True
+                    p_fig = tf_fig.paragraphs[0]
+                    p_fig.alignment = PP_ALIGN.CENTER
+                    r_fig = p_fig.add_run()
+                    r_fig.text = stat["figure"]
+                    r_fig.font.size = Pt(44)
+                    r_fig.font.bold = True
+                    r_fig.font.color.rgb = _rgb(fig_color)
+                    r_fig.font.name = "IBM Plex Sans"
+                    desc_top = card_top + Inches(2.25)
+                # Descripción centrada
+                tb_desc = sl.shapes.add_textbox(cx + Inches(0.2), desc_top,
+                                                cw - Inches(0.4), card_top + card_h - desc_top)
                 tf_desc = tb_desc.text_frame
                 tf_desc.word_wrap = True
                 p_desc = tf_desc.paragraphs[0]
+                p_desc.alignment = PP_ALIGN.CENTER
                 r_desc = p_desc.add_run()
                 r_desc.text = stat["desc"]
                 r_desc.font.size = Pt(15)
@@ -2669,6 +2868,10 @@ def build_pptx(
     slide_num += 1
     closing = prs.slides.add_slide(blank_layout)
     _set_bg(closing, tc["bg"])
+    # Mismo círculo translúcido de la portada, en la esquina opuesta — cierra
+    # el deck con el mismo lenguaje visual con el que abrió (bookend).
+    _add_soft_circle(closing, SLIDE_W + Inches(0.3), SLIDE_H + Inches(0.3), Inches(5.5),
+                     _IBM_BLUE if theme == "light" else _IBM_ACCENT_DARK, 8)
     _add_slide_chrome(closing, slide_num, SLIDE_W, SLIDE_H, tc, logo_path)
 
     # Barra lateral izquierda IBM Blue

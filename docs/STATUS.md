@@ -199,13 +199,25 @@ funciona igual que antes (sin COS). `GET /files/<nombre>` devuelve 503 en ese ca
   primeros ~3000 caracteres del texto YA extraído — no se vuelve a parsear el PDF) pidiendo
   SOLO uno de los 7 IDs de `VALID_TAGS` o `none`. Misma whitelist estricta que el tag manual
   (`_sanitize_tag`): cualquier respuesta fuera de los 7 IDs cae a `NULL`, la ingesta nunca
-  falla por esto. Si el usuario SÍ eligió una categoría en el dropdown, esa gana siempre
-  (el auto-detect ni se llama). Solo toca el camino de ingesta — `/query`/`/query_stream` no
-  se tocaron, verificado sin regresión de latencia (barrido de 7 productos, ~4.3s promedio
-  en estado estable, igual que antes). Frontend: copy del dropdown actualizado a "Categoría
-  (se detecta automáticamente; elige una para forzarla)" / opción por defecto ahora
-  "Detectar automáticamente" en vez de "Sin categoría" (mismo `id: ''`, sin cambio de
-  comportamiento de envío del form). Contrato completo en `docs/GOVERNANCE.md`.
+  falla por esto. Solo toca el camino de ingesta — `/query`/`/query_stream` no se tocaron,
+  verificado sin regresión de latencia (barrido de 7 productos, ~4.3s promedio en estado
+  estable, igual que antes). **Update 2026-09-16**: el dropdown de categoría manual en el
+  panel "Indexar un PDF" se ELIMINÓ del frontend por instrucción directa de César ("elimina
+  la opción de agregar una etiqueta, haz que el auto-detect esté por default") — ya no hay
+  override manual, el backend siempre auto-detecta (`ingestTag`/`tagItems`/dropdown y las
+  keys i18n `tagLabel`/`noTag` borrados de `App.jsx`). Contrato completo en `docs/GOVERNANCE.md`.
+- **Diseño "nivel 2" del PPTX (2026-09-16)**: feedback directo de César tras los 3 fixes de
+  layout anteriores fue que el nivel visual "es el mismo, no le agregaste absolutamente
+  nada" — esos fixes eran correcciones de bugs, no una mejora de diseño real. Se añadió una
+  capa de diseño con profundidad: fondos degradados + círculos translúcidos en portada/
+  divisores (antes color plano), tarjetas con esquina redondeada + sombra suave en cards/
+  stats (antes rectángulos planos), icon chip subido de badge de 0.55" a tarjeta de ~1.15"
+  con sombra, comilla gigante translúcida de fondo en la slide de impacto, y — el cambio de
+  mayor impacto — **gráfico doughnut nativo** (anillo de progreso real, no texto) para cifras
+  porcentuales en slides de stats, con el % superpuesto en el centro. Verificado visualmente
+  (LibreOffice headless → PDF → inspección de imagen) en ambos temas, con grids 2x2 y fila de
+  3, y casos límite de porcentaje (100%, 0.5%) antes de dar por cerrado. Detalle técnico y
+  contrato de los layouts en `docs/GOVERNANCE.md`.
 
 ## Pendiente (próximos pasos)
 1. **Deploy a Code Engine**: imágenes ya listas. Falta: secret del backend con las vars

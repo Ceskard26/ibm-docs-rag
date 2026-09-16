@@ -304,6 +304,25 @@ datos, un patrón) se registra como un ADR corto en `docs/adr/NNNN-titulo.md`:
   prohibidos (todo bullet es def, stat, paso numerado o `**keyword**` inicial), máx 12 palabras
   por bullet, títulos máx 6 palabras, arco narrativo contexto/problema → solución + valor → CTA,
   solo UNA slide de impacto (`>`) por deck.
+- **Diseño "nivel 2" del PPTX (2026-09-16):** feedback directo del usuario tras 3 fixes de
+  bugs de layout fue "el nivel es el mismo, no le agregaste absolutamente nada" — los fixes
+  anteriores eran correcciones, no una mejora visual real. Se añadió una capa de diseño con
+  profundidad real (helpers `_add_gradient_bg`, `_add_soft_circle`, `_add_rounded_rect`,
+  `_add_shadow`, `_set_color_alpha` — python-pptx no expone gradientes/sombras/transparencia
+  en su API pública, se manipula el XML `effectLst`/`gradFill`/`alpha` directamente):
+  portada y `divider` con fondo degradado (IBM Blue → azul oscuro) + círculos translúcidos
+  decorativos en vez de color plano; `cards`/`stats` con tarjetas de esquina redondeada y
+  sombra suave (antes rectángulos planos sin jerarquía); icon chip (`_render_icon`) subido de
+  badge de 0.55" casi invisible a tarjeta de ~1.15" con sombra — aprovecha que los iconos
+  oficiales de arquitectura IBM ya traen su propio color de categoría, dando variedad
+  cromática al deck sin salirse de marca; `impact` con una comilla gigante translúcida de
+  fondo como ancla visual; cierre con el mismo círculo de la portada (bookend). El cambio de
+  mayor impacto: `stats` con cifra porcentual (`**72%** desc`) renderiza un **gráfico
+  doughnut nativo** (anillo de progreso real vía `chart.XL_CHART_TYPE.DOUGHNUT`, no texto) con
+  el % superpuesto en el centro — cifras no-porcentuales (`5 min`, `300+`) siguen como número
+  grande centrado. Verificado visualmente (LibreOffice headless → PDF → inspección de imagen)
+  en ambos temas y con casos límite (100%, 0.5%, grids 2x2 y fila de 3) antes de dar por
+  cerrado — mismo protocolo de verificación que los fixes anteriores de esta sesión.
 - **Embeddings:** `ibm/granite-embedding-278m-multilingual` (768 dim). Cambiarlo
   invalida los vectores existentes → requiere reindexar (ADR obligatorio).
 
